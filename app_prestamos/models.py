@@ -15,6 +15,7 @@ class Cliente(models.Model):
     def __str__(self):
         return f"{self.apellido}, {self.nombre}"
 
+
 class Prestamo(models.Model):
     FRECUENCIAS = (
         ('diario', 'Diario'),
@@ -70,6 +71,16 @@ class Prestamo(models.Model):
                 monto_total=monto_cuota,
                 fecha_vencimiento=fecha_venc
             )
+    
+    @property
+    def saldo_pendiente(self):
+        return self.plan_pagos.filter(esta_pagada=False).aggregate(models.Sum('monto_total'))['monto_total__sum'] or 0
+
+    def check_finalizacion(self):
+        if not self.plan_pagos.filter(esta_pagada=False).exists():
+            self.estado = 'finalizado'
+            self.save()
+
 
 class Cuota(models.Model):
     prestamo = models.ForeignKey(Prestamo, on_delete=models.CASCADE, related_name='plan_pagos')
@@ -94,3 +105,23 @@ class Cuota(models.Model):
     @property
     def total_con_mora(self):
         return self.monto_total + self.calcular_mora()
+
+
+class Caja(models.Model):
+    TIPOS = (
+        ('ingreso', 'Ingreso (Cobro, Aporte)'),
+        ('egreso', 'Egreso (Préstamo, Gasto)'),
+    )
+    tipo = models.CharField(max_length=10, choices=TIPOS)
+    monto = models.DecimalField(max_digits=12, decimal_places=2)
+    concepto = models.CharField(max_length=255)
+    fecha = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.tipo} - {self.monto} ({self.fecha.strftime('%d/%m/%Y')})"
+
+    @classmethod
+    def saldo_actual(cls):
+        ingresos = cls.objects.filter(tipo='ingreso').aggregate(models.Sum('monto'))['monto__sum'] or 0
+        egresos = cls.objects.filter(tipo='egreso').aggregate(models.Sum('monto'))['monto__sum'] or 0
+        return ingresos - egresos
