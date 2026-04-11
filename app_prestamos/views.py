@@ -1,22 +1,36 @@
 from django.shortcuts import render
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, filters
 from rest_framework.response import Response
 from .models import Cliente, Prestamo, Cuota, Caja
 from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer
 from rest_framework.decorators import action
 from django.utils import timezone
+from django_filters.rest_framework import DjangoFilterBackend
+from .filters import PrestamoFilter, CuotaFilter
 
 
 class ClienteViewSet(viewsets.ModelViewSet):
     queryset = Cliente.objects.all()
     serializer_class = ClienteSerializer
 
+
 class PrestamoViewSet(viewsets.ModelViewSet):
     queryset = Prestamo.objects.all()
     serializer_class = PrestamoSerializer
-
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    
+    # Vinculamos el filtro
+    filterset_class = PrestamoFilter
+    
+    # Habilitamos búsqueda por nombre de cliente o DNI
+    search_fields = ['cliente__nombre', 'cliente__apellido', 'cliente__dni']
+    
+    # Permitimos ordenar por fecha de inicio o monto
+    ordering_fields = ['fecha_inicio', 'monto_solicitado']
+    
+    
+    # Sobrescribimos el método create para disparar la lógica de cuotas
     def create(self, request, *args, **kwargs):
-        # Sobrescribimos el método create para disparar la lógica de cuotas
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
@@ -29,9 +43,13 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
+
 class CuotaViewSet(viewsets.ModelViewSet):
     queryset = Cuota.objects.all()
     serializer_class = CuotaSerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_class = CuotaFilter
+    ordering_fields = ['fecha_vencimiento', 'numero_cuota']
     
     @action(detail=True, methods=['post'])
     def registrar_pago(self, request, pk=None):
