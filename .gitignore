@@ -1,0 +1,85 @@
+# 🔒 Entorno virtual
+
+env/
+venv/
+ENV/
+
+# 🐍 Archivos Python
+
+**pycache**/
+*.py[cod]
+*.pyo
+*.pyd
+
+# 🧪 Archivos de testing / coverage
+
+.coverage
+htmlcov/
+.pytest_cache/
+
+# 🧾 Archivos de logs
+
+*.log
+
+# ⚙️ Archivos de configuración local
+
+.env
+.env.*
+*.env
+
+# 🔑 Secretos
+
+*.key
+*.pem
+
+# 🗄️ Base de datos
+
+db.sqlite3
+*.sqlite3
+
+# 📦 Archivos estáticos generados
+
+staticfiles/
+
+# 📁 Media (uploads)
+
+media/
+
+# 🧠 Archivos de Django
+
+*.pot
+*.mo
+
+# 🖥️ IDE / Editor
+
+.vscode/
+.idea/
+
+# 🐧 Linux
+
+*~
+
+# 🪟 Windows
+
+Thumbs.db
+Desktop.ini
+
+# 🍎 Mac
+
+.DS_Store
+
+# 📦 Node (si usás frontend después)
+
+node_modules/
+
+# 🧪 Archivos temporales
+
+*.swp
+
+# 🔥 Migraciones (opcional)
+
+# migrations/
+
+# */migrations/
+
+# !*/migrations/**init**.py
