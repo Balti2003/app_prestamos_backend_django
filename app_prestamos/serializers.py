@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Cliente, Prestamo, Cuota
+from .models import Cliente, Prestamo, Cuota, Caja
 
 class ClienteSerializer(serializers.ModelSerializer):
     class Meta:
@@ -25,4 +25,9 @@ class PrestamoSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Prestamo
+        fields = '__all__'
+
+class CajaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Caja
         fields = '__all__'

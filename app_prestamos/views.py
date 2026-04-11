@@ -2,7 +2,7 @@ from django.shortcuts import render
 from rest_framework import viewsets, status, filters
 from rest_framework.response import Response
 from .models import Cliente, Prestamo, Cuota, Caja
-from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer
+from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer, CajaSerializer
 from rest_framework.decorators import action
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -79,3 +79,8 @@ class CuotaViewSet(viewsets.ModelViewSet):
             'mora_cobrada': mora,
             'total_recibido': cuota.monto_total + mora
         })
+
+
+class CajaViewSet(viewsets.ModelViewSet):
+    queryset = Caja.objects.all().order_by('-fecha') # Los últimos movimientos primero
+    serializer_class = CajaSerializer
