@@ -1,5 +1,5 @@
 from django.shortcuts import render
-from rest_framework import viewsets, status, filters
+from rest_framework import viewsets, status, filters, serializers
 from rest_framework.response import Response
 from .models import Cliente, Prestamo, Cuota, Caja
 from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer, CajaSerializer
@@ -18,26 +18,34 @@ class PrestamoViewSet(viewsets.ModelViewSet):
     queryset = Prestamo.objects.all()
     serializer_class = PrestamoSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    
-    # Vinculamos el filtro
-    filterset_class = PrestamoFilter
-    
-    # Habilitamos búsqueda por nombre de cliente o DNI
-    search_fields = ['cliente__nombre', 'cliente__apellido', 'cliente__dni']
-    
-    # Permitimos ordenar por fecha de inicio o monto
-    ordering_fields = ['fecha_inicio', 'monto_solicitado']
-    
+    filterset_class = PrestamoFilter # Vinculamos el filtro
+    search_fields = ['cliente__nombre', 'cliente__apellido', 'cliente__dni'] # Habilitamos búsqueda por nombre de cliente o DNI
+    ordering_fields = ['fecha_inicio', 'monto_solicitado'] # Permitimos ordenar por fecha de inicio o monto
     
     # Sobrescribimos el método create para disparar la lógica de cuotas
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        
-        # Guardamos el préstamo
+
+        # Validamos que haya plata en la caja
+        monto_solicitado = serializer.validated_data['monto_solicitado']
+        saldo_disponible = Caja.saldo_actual()
+
+        if saldo_disponible < monto_solicitado:
+            # Si no hay plata, frenamos todo y devolvemos error 400
+            return Response(
+                {
+                    "error": "Fondos insuficientes en caja.",
+                    "saldo_actual": float(saldo_disponible),
+                    "monto_requerido": float(monto_solicitado)
+                }, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Si pasó la validación, guardamos el préstamo
         prestamo = serializer.save()
         
-        # Disparamos la función que definimos en el modelo
+        # Generamos las cuotas
         prestamo.generar_plan_pagos()
         
         headers = self.get_success_headers(serializer.data)

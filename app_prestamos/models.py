@@ -2,7 +2,9 @@ from decimal import Decimal
 from django.db import models
 from datetime import timedelta
 from django.utils import timezone
+from django.db.models import Sum
 
+        
 class Cliente(models.Model):
     nombre = models.CharField(max_length=100)
     apellido = models.CharField(max_length=100)
@@ -117,11 +119,11 @@ class Caja(models.Model):
     concepto = models.CharField(max_length=255)
     fecha = models.DateTimeField(auto_now_add=True)
 
-    def __str__(self):
-        return f"{self.tipo} - {self.monto} ({self.fecha.strftime('%d/%m/%Y')})"
-
     @classmethod
     def saldo_actual(cls):
-        ingresos = cls.objects.filter(tipo='ingreso').aggregate(models.Sum('monto'))['monto__sum'] or 0
-        egresos = cls.objects.filter(tipo='egreso').aggregate(models.Sum('monto'))['monto__sum'] or 0
+        ingresos = cls.objects.filter(tipo='ingreso').aggregate(total=Sum('monto'))['total'] or 0
+        egresos = cls.objects.filter(tipo='egreso').aggregate(total=Sum('monto'))['total'] or 0
         return ingresos - egresos
+
+    def __str__(self):
+        return f"{self.tipo.upper()} - {self.monto} ({self.fecha.strftime('%d/%m/%Y')})"
