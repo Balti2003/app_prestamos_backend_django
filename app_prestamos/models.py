@@ -44,9 +44,6 @@ class Prestamo(models.Model):
     fecha_inicio = models.DateField(default=timezone.now)
     estado = models.CharField(max_length=15, choices=ESTADOS, default='pendiente')
     activo = models.BooleanField(default=True)
-
-    def __str__(self):
-        return f"Préstamo #{self.id} - {self.cliente.apellido}"
     
     def delete(self, *args, **kwargs ):
         self.activo = False
@@ -99,6 +96,9 @@ class Prestamo(models.Model):
             if original.estado != self.estado:
                 pass 
         super().save(*args, **kwargs)
+        
+    def __str__(self):
+        return f"Préstamo #{self.id} - {self.cliente.apellido}"
 
 
 class Cuota(models.Model):

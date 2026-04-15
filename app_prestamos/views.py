@@ -6,6 +6,7 @@ from rest_framework.decorators import action
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from .filters import PrestamoFilter, CuotaFilter
+from django.db import transaction
 
 
 class ClienteViewSet(viewsets.ModelViewSet):
@@ -60,32 +61,59 @@ class CuotaViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def registrar_pago(self, request, pk=None):
-        cuota = self.get_object()
+        cuota_actual = self.get_object()
         
-        if cuota.esta_pagada:
-            return Response({'error': 'Esta cuota ya fue pagada.'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Registramos el pago
-        cuota.esta_pagada = True
-        cuota.fecha_pago_real = timezone.now()
-        
-        # Aquí calculamos si hubo mora al momento del pago
-        mora = cuota.calcular_mora()
-        
-        cuota.save()
+        # 1. Validar que no esté ya pagada
+        if cuota_actual.esta_pagada:
+            return Response(
+                {'error': 'Esta cuota ya fue pagada anteriormente.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        # Registrar el movimiento en la caja
-        Caja.objects.create(
-            tipo='ingreso',
-            monto=cuota.monto_total + mora,
-            concepto=f"Pago cuota {cuota.numero_cuota} - Préstamo #{cuota.prestamo.id}"
-        )
+        # Buscamos si existe alguna cuota del mismo préstamo con un número menor que NO esté pagada
+        cuotas_anteriores_pendientes = Cuota.objects.filter(
+            prestamo=cuota_actual.prestamo,
+            numero_cuota__lt=cuota_actual.numero_cuota,
+            esta_pagada=False
+        ).exists()
 
-        return Response({
-            'status': 'Pago registrado exitosamente',
-            'mora_cobrada': mora,
-            'total_recibido': cuota.monto_total + mora
-        })
+        if cuotas_anteriores_pendientes:
+            return Response(
+                {
+                    'error': 'No se puede cobrar esta cuota. El cliente debe pagar las cuotas anteriores primero.',
+                    'detalle': f'Existen cuotas previas a la #{cuota_actual.numero_cuota} pendientes de pago.'
+                }, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            with transaction.atomic():
+                # Marcamos como pagada
+                cuota_actual.esta_pagada = True
+                cuota_actual.fecha_pago_real = timezone.now().date()
+                
+                # Calculamos la mora para la respuesta
+                mora = cuota_actual.calcular_mora()
+                
+                # Guardamos los cambios
+                cuota_actual.save()
+
+            return Response({
+                'status': 'Pago registrado con éxito y reflejado en caja',
+                'cuota': cuota_actual.numero_cuota,
+                'mora_aplicada': float(mora),
+                'monto_total_recibido': float(cuota_actual.monto_total + mora)
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            # Si algo sale mal (como el error de atributo que tuviste antes), cae aquí
+            return Response(
+                {
+                    'error': 'Error crítico al procesar el pago en el servidor.',
+                    'detalle': str(e)
+                }, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class CajaViewSet(viewsets.ModelViewSet):
