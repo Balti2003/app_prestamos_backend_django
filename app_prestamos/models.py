@@ -13,10 +13,15 @@ class Cliente(models.Model):
     telefono = models.CharField(max_length=20)
     score_interno = models.IntegerField(default=50) # 0 a 100
     creado_el = models.DateTimeField(auto_now_add=True)
+    activo = models.BooleanField(default=True)
 
     def __str__(self):
         return f"{self.apellido}, {self.nombre}"
-
+    
+    def delete(self, *args, **kwargs ):
+        self.activo = False
+        self.save()
+        
 
 class Prestamo(models.Model):
     FRECUENCIAS = (
@@ -38,9 +43,14 @@ class Prestamo(models.Model):
     frecuencia = models.CharField(max_length=10, choices=FRECUENCIAS, default='mensual')
     fecha_inicio = models.DateField(default=timezone.now)
     estado = models.CharField(max_length=15, choices=ESTADOS, default='pendiente')
+    activo = models.BooleanField(default=True)
 
     def __str__(self):
         return f"Préstamo #{self.id} - {self.cliente.apellido}"
+    
+    def delete(self, *args, **kwargs ):
+        self.activo = False
+        self.save()
     
     def generar_plan_pagos(self):
         """
@@ -82,6 +92,13 @@ class Prestamo(models.Model):
         if not self.plan_pagos.filter(esta_pagada=False).exists():
             self.estado = 'finalizado'
             self.save()
+            
+    def save(self, *args, **kwargs):
+        if self.pk: # Si el préstamo ya existe (es una actualización)
+            original = Prestamo.objects.get(pk=self.pk)
+            if original.estado != self.estado:
+                pass 
+        super().save(*args, **kwargs)
 
 
 class Cuota(models.Model):
@@ -126,4 +143,15 @@ class Caja(models.Model):
         return ingresos - egresos
 
     def __str__(self):
-        return f"{self.tipo.upper()} - {self.monto} ({self.fecha.strftime('%d/%m/%Y')})"
+        return f"{self.tipo.upper()} - {self.monto} ({self.fecha.strftime('%d/%m/%Y')})" 
+
+
+class HistorialEstado(models.Model):
+    prestamo = models.ForeignKey(Prestamo, on_delete=models.CASCADE, related_name='historial_estados')
+    estado_anterior = models.CharField(max_length=15)
+    estado_nuevo = models.CharField(max_length=15)
+    fecha_cambio = models.DateTimeField(auto_now_add=True)
+    motivo = models.CharField(max_length=255, blank=True)
+
+    def __str__(self):
+        return f"{self.prestamo} cambió a {self.estado_nuevo} el {self.fecha_cambio}"

@@ -1,5 +1,4 @@
-from django.shortcuts import render
-from rest_framework import viewsets, status, filters, serializers
+from rest_framework import viewsets, status, filters
 from rest_framework.response import Response
 from .models import Cliente, Prestamo, Cuota, Caja
 from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer, CajaSerializer
@@ -10,12 +9,12 @@ from .filters import PrestamoFilter, CuotaFilter
 
 
 class ClienteViewSet(viewsets.ModelViewSet):
-    queryset = Cliente.objects.all()
+    queryset = Cliente.objects.filter(activo=True)
     serializer_class = ClienteSerializer
 
 
 class PrestamoViewSet(viewsets.ModelViewSet):
-    queryset = Prestamo.objects.all()
+    queryset = Prestamo.objects.filter(activo=True)
     serializer_class = PrestamoSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_class = PrestamoFilter # Vinculamos el filtro
