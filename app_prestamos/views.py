@@ -7,6 +7,9 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from .filters import PrestamoFilter, CuotaFilter
 from django.db import transaction
+from reportlab.pdfgen import canvas
+from django.http import HttpResponse
+from io import BytesIO
 
 
 class ClienteViewSet(viewsets.ModelViewSet):
@@ -114,6 +117,35 @@ class CuotaViewSet(viewsets.ModelViewSet):
                 }, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+        
+    @action(detail=True, methods=['get'])
+    def generar_recibo(self, request, pk=None):
+        cuota = self.get_object()
+        if not cuota.esta_pagada:
+            return Response({'error': 'No se puede generar recibo de una cuota no pagada'}, status=400)
+
+        # Crear el PDF en memoria
+        buffer = BytesIO()
+        p = canvas.Canvas(buffer)
+
+        # Diseño del Recibo
+        p.setFont("Helvetica-Bold", 16)
+        p.drawString(100, 800, f"RECIBO DE PAGO - Cuota #{cuota.numero_cuota}")
+        
+        p.setFont("Helvetica", 12)
+        p.drawString(100, 770, f"Cliente: {cuota.prestamo.cliente.nombre} {cuota.prestamo.cliente.apellido}")
+        p.drawString(100, 750, f"Fecha de Pago: {cuota.fecha_pago_real}")
+        p.drawString(100, 730, f"Monto Cuota: ${cuota.monto_total}")
+        p.drawString(100, 710, f"Mora Pagada: ${cuota.calcular_mora()}")
+        p.line(100, 690, 500, 690)
+        p.drawString(100, 670, f"TOTAL RECIBIDO: ${cuota.monto_total + cuota.calcular_mora()}")
+
+        p.showPage()
+        p.save()
+
+        buffer.seek(0)
+        return HttpResponse(buffer, content_type='application/pdf', 
+                            headers={'Content-Disposition': f'attachment; filename="Recibo_Cuota_{cuota.id}.pdf"'})
 
 
 class CajaViewSet(viewsets.ModelViewSet):

@@ -126,6 +126,18 @@ class Cuota(models.Model):
         return self.monto_total + self.calcular_mora()
 
 
+class HistorialCuota(models.Model):
+    cuota = models.ForeignKey(Cuota, on_delete=models.CASCADE, related_name='historial')
+    estado_anterior = models.CharField(max_length=50)
+    estado_nuevo = models.CharField(max_length=50)
+    fecha_cambio = models.DateTimeField(auto_now_add=True)
+    usuario = models.CharField(max_length=100, blank=True, null=True) # Por ahora texto, luego puede ser el User de Django
+    observaciones = models.TextField(blank=True)
+
+    def __str__(self):
+        return f"Cuota {self.cuota.id}: {self.estado_anterior} -> {self.estado_nuevo}"
+
+
 class Caja(models.Model):
     TIPOS = (
         ('ingreso', 'Ingreso (Cobro, Aporte)'),
