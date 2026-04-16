@@ -7,9 +7,12 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from .filters import PrestamoFilter, CuotaFilter
 from django.db import transaction
-from reportlab.pdfgen import canvas
 from django.http import HttpResponse
 from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 
 class ClienteViewSet(viewsets.ModelViewSet):
@@ -127,28 +130,70 @@ class CuotaViewSet(viewsets.ModelViewSet):
         if not cuota.esta_pagada:
             return Response({'error': 'No se puede generar recibo de una cuota no pagada'}, status=400)
 
-        # Crear el PDF en memoria
         buffer = BytesIO()
-        p = canvas.Canvas(buffer)
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50)
+        styles = getSampleStyleSheet()
+        elements = []
 
-        # Diseño del Recibo
-        p.setFont("Helvetica-Bold", 16)
-        p.drawString(100, 800, f"RECIBO DE PAGO - Cuota #{cuota.numero_cuota}")
+        # --- ENCABEZADO ---
+        titulo_style = ParagraphStyle('TituloStyle', parent=styles['Heading1'], fontSize=18, alignment=1, spaceAfter=20)
+        elements.append(Paragraph("COMPROBANTE DE PAGO", titulo_style))
+        elements.append(Paragraph(f"<b>Sistema de Gestión de Préstamos</b>", styles['Normal']))
+        elements.append(Paragraph(f"Fecha de emisión: {timezone.now().strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
+        elements.append(Spacer(1, 20))
+
+        # --- DATOS DEL CLIENTE Y PRÉSTAMO ---
+        data_cliente = [
+            [Paragraph(f"<b>Cliente:</b> {cuota.prestamo.cliente.nombre} {cuota.prestamo.cliente.apellido}", styles['Normal']), 
+             Paragraph(f"<b>DNI/CUIL:</b> {getattr(cuota.prestamo.cliente, 'dni', '---')}", styles['Normal'])],
+            [Paragraph(f"<b>Préstamo ID:</b> #{cuota.prestamo.id}", styles['Normal']), 
+             Paragraph(f"<b>Cuota N°:</b> {cuota.numero_cuota}", styles['Normal'])]
+        ]
+        t_cliente = Table(data_cliente, colWidths=[250, 200])
+        elements.append(t_cliente)
+        elements.append(Spacer(1, 20))
+
+        # --- DETALLE DEL PAGO (TABLA) ---
+        mora = cuota.calcular_mora()
+        total = cuota.monto_total + mora
         
-        p.setFont("Helvetica", 12)
-        p.drawString(100, 770, f"Cliente: {cuota.prestamo.cliente.nombre} {cuota.prestamo.cliente.apellido}")
-        p.drawString(100, 750, f"Fecha de Pago: {cuota.fecha_pago_real}")
-        p.drawString(100, 730, f"Monto Cuota: ${cuota.monto_total}")
-        p.drawString(100, 710, f"Mora Pagada: ${cuota.calcular_mora()}")
-        p.line(100, 690, 500, 690)
-        p.drawString(100, 670, f"TOTAL RECIBIDO: ${cuota.monto_total + cuota.calcular_mora()}")
+        data_pago = [
+            ['Descripción', 'Monto'],
+            ['Monto de la Cuota', f"${cuota.monto_total:,.2f}"],
+            ['Intereses por Mora', f"${mora:,.2f}"],
+            [Paragraph('<b>TOTAL PAGADO</b>', styles['Normal']), f'${total:,.2f}']
+        ]
 
-        p.showPage()
-        p.save()
+        t_pago = Table(data_pago, colWidths=[350, 100])
+        t_pago.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (1, 0), 'CENTER'),
+            ('FONTNAME', (0, 0), (1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (1, 0), 12),
+            ('BACKGROUND', (0, 3), (1, 3), colors.lightgrey),
+            ('GRID', (0, 0), (1, 3), 1, colors.black),
+            ('ALIGN', (1, 1), (1, 3), 'RIGHT'),
+        ]))
+        elements.append(t_pago)
+        elements.append(Spacer(1, 40))
 
+        # --- FIRMA Y PIE ---
+        elements.append(Paragraph(f"Cobrado por: {request.user.get_full_name() or request.user.username}", styles['Normal']))
+        elements.append(Spacer(1, 30))
+        elements.append(Paragraph("__________________________", styles['Normal']))
+        elements.append(Paragraph("Firma y Sello del Receptor", styles['Normal']))
+        
+        elements.append(Spacer(1, 50))
+        nota_style = ParagraphStyle('NotaStyle', parent=styles['Normal'], fontSize=8, textColor=colors.grey)
+        elements.append(Paragraph("Este documento sirve como comprobante legal de pago para el período mencionado. Conserve este recibo para cualquier reclamo futuro.", nota_style))
+
+        # Construir PDF
+        doc.build(elements)
         buffer.seek(0)
-        return HttpResponse(buffer, content_type='application/pdf', 
-                            headers={'Content-Disposition': f'attachment; filename="Recibo_Cuota_{cuota.id}.pdf"'})
+        
+        filename = f"Recibo_P# {cuota.prestamo.id}_C# {cuota.numero_cuota}.pdf"
+        return HttpResponse(buffer, content_type='application/pdf', headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
 
 class CajaViewSet(viewsets.ModelViewSet):
