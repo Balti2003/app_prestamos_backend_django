@@ -1,6 +1,6 @@
 from rest_framework import viewsets, status, filters
 from rest_framework.response import Response
-from .models import Cliente, Prestamo, Cuota, Caja
+from .models import Cliente, Prestamo, Cuota, Caja, HistorialCuota
 from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer, CajaSerializer
 from rest_framework.decorators import action
 from django.utils import timezone
@@ -91,32 +91,35 @@ class CuotaViewSet(viewsets.ModelViewSet):
 
         try:
             with transaction.atomic():
-                # Marcamos como pagada
+                # Capturamos el usuario del Token
+                # Si el token es válido, request.user es el objeto de tu Admin
+                usuario_obj = request.user
+                
+                # Armamos el nombre para el historial
+                if usuario_obj.is_authenticated:
+                    # Intentamos nombre completo, si no, el username
+                    nombre_operador = f"{usuario_obj.first_name} {usuario_obj.last_name}".strip()
+                    operador = nombre_operador if nombre_operador else usuario_obj.username
+                else:
+                    operador = "Sistema (Token no detectado)"
+
+                # Procesamos el pago
                 cuota_actual.esta_pagada = True
                 cuota_actual.fecha_pago_real = timezone.now().date()
-                
-                # Calculamos la mora para la respuesta
-                mora = cuota_actual.calcular_mora()
-                
-                # Guardamos los cambios
                 cuota_actual.save()
 
-            return Response({
-                'status': 'Pago registrado con éxito y reflejado en caja',
-                'cuota': cuota_actual.numero_cuota,
-                'mora_aplicada': float(mora),
-                'monto_total_recibido': float(cuota_actual.monto_total + mora)
-            }, status=status.HTTP_200_OK)
+                # Creamos el Historial
+                HistorialCuota.objects.create(
+                    cuota=cuota_actual,
+                    estado_anterior="Pendiente",
+                    estado_nuevo="Pagada",
+                    usuario=operador,
+                    observaciones="Pago procesado con éxito vía API."
+                )
 
+            return Response({'status': 'Pago registrado con éxito'}, status=status.HTTP_200_OK)
         except Exception as e:
-            # Si algo sale mal (como el error de atributo que tuviste antes), cae aquí
-            return Response(
-                {
-                    'error': 'Error crítico al procesar el pago en el servidor.',
-                    'detalle': str(e)
-                }, 
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
     @action(detail=True, methods=['get'])
     def generar_recibo(self, request, pk=None):
