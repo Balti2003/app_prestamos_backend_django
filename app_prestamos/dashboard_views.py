@@ -4,6 +4,7 @@ from django.db.models import Sum
 from django.utils import timezone
 from .models import Prestamo, Cuota, Cliente, Caja
 
+
 class DashboardResumenView(APIView):
     def get(self, request):
         hoy = timezone.now().date()
