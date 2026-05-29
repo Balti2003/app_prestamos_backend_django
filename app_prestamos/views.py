@@ -1,4 +1,3 @@
-from decimal import Decimal
 from rest_framework import viewsets, status, filters
 from rest_framework.response import Response
 from .models import Cliente, Prestamo, Cuota, Caja, HistorialCuota
@@ -14,11 +13,33 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from django.shortcuts import get_object_or_404
 
 
 class ClienteViewSet(viewsets.ModelViewSet):
     queryset = Cliente.objects.filter(activo=True)
     serializer_class = ClienteSerializer
+
+    @action(detail=True, methods=['get'])
+    def cuotas_cobrables(self, request, pk=None):
+        cliente = self.get_object()
+        # Buscamos préstamos que no estén finalizados ni pendientes
+        prestamos = cliente.prestamos.filter(estado__in=['pendiente', 'activo', 'mora'], activo=True)
+        
+        proximas_cuotas = []
+        for p in prestamos:
+            # Traemos la cuota más vieja sin pagar de ESTE préstamo
+            cuota = p.plan_pagos.filter(esta_pagada=False).order_by('numero_cuota').first()
+            if cuota:
+                proximas_cuotas.append({
+                    "cuota_id": cuota.id,
+                    "prestamo_id": p.id,
+                    "numero_cuota": cuota.numero_cuota,
+                    "monto": str(cuota.monto_total),
+                    "prestamo_nombre": f"Préstamo #{p.id} - Valor Cuota: ${cuota.monto_total}"
+                })
+                
+        return Response(proximas_cuotas)
 
 
 class PrestamoViewSet(viewsets.ModelViewSet):
@@ -59,43 +80,34 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     @action(detail=False, methods=['post'])
-    def registrar_pago(self, request):
-        cliente_id = request.data.get('cliente_id')
-        monto_pagado = Decimal(request.data.get('monto', 0))
-
-        # 1. Buscamos el préstamo del cliente
-        prestamo = Prestamo.objects.filter(
-            cliente_id=cliente_id,
-            plan_pagos__esta_pagada=False # Filtra préstamos con deuda real
-        ).distinct().order_by('fecha_inicio').first()
-
-        if not prestamo:
-            return Response({"error": "Este cliente no tiene deudas pendientes de cobro."}, status=400)
-
-        # 2. Buscamos la cuota más vieja de ESE préstamo específico
-        cuota = prestamo.plan_pagos.filter(esta_pagada=False).order_by('numero_cuota').first()
-
-        if cuota:
-            cuota.esta_pagada = True
-            cuota.fecha_pago_real = timezone.now().date()
-            cuota.save()
-
-            # 3. Registrar en Caja
-            Caja.objects.create(
-                tipo='ingreso',
-                monto=monto_pagado,
-                concepto=f"Cobro Cta #{cuota.numero_cuota} - Prest #{prestamo.id} - {prestamo.cliente.apellido}"
-            )
-
-            # 4. Actualizar estado del préstamo
-            prestamo.check_finalizacion()
-
-            return Response({
-                "message": f"Pago de ${monto_pagado} registrado con éxito",
-                "proximo_vencimiento": "Plan completado" if prestamo.estado == 'finalizado' else "Pendiente"
-            })
+    def registrar_pago_exacto(self, request):
+        cuota_id = request.data.get('cuota_id')
         
-        return Response({"error": "No se encontró una cuota pendiente para procesar."}, status=400)
+        if not cuota_id:
+            return Response({"error": "Debe proporcionar el ID de la cuota a pagar."}, status=400)
+            
+        # Buscamos la cuota exacta. Si ya está paga, tira error.
+        cuota = get_object_or_404(Cuota, id=cuota_id, esta_pagada=False)
+        prestamo = cuota.prestamo
+
+        # 1. Procesamos el pago de la cuota
+        cuota.esta_pagada = True
+        cuota.fecha_pago_real = timezone.now().date()
+        cuota.save()
+
+        # 2. Registramos el movimiento exacto en Caja
+        Caja.objects.create(
+            tipo='ingreso',
+            monto=cuota.monto_total,
+            concepto=f"Cobro Cuota #{cuota.numero_cuota} - Prest #{prestamo.id} - Cliente: {prestamo.cliente.apellido}"
+        )
+
+        # 3. Verificamos si con esta cuota se cerró el préstamo completo
+        prestamo.check_finalizacion()
+
+        return Response({
+            "message": f"Cuota #{cuota.numero_cuota} del Préstamo #{prestamo.id} registrada con éxito."
+        })
 
 
 class CuotaViewSet(viewsets.ModelViewSet):

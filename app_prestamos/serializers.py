@@ -61,6 +61,12 @@ class PrestamoMiniSerializer(serializers.ModelSerializer):
         return cuota.monto_total if cuota else 0
 
 class CajaSerializer(serializers.ModelSerializer):
+    fecha_formateada = serializers.SerializerMethodField()
+
     class Meta:
         model = Caja
-        fields = '__all__'
+        fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada']
+    
+    def get_fecha_formateada(self, obj):
+        # Formateo para que sea legible en el frontend
+        return obj.fecha.strftime("%d/%m/%Y %H:%M")
