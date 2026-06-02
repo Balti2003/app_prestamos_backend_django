@@ -62,10 +62,11 @@ class PrestamoMiniSerializer(serializers.ModelSerializer):
 
 class CajaSerializer(serializers.ModelSerializer):
     fecha_formateada = serializers.SerializerMethodField()
+    cuota_id = serializers.ReadOnlyField(source='cuota.id')
 
     class Meta:
         model = Caja
-        fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada']
+        fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada', 'cuota_id']
     
     def get_fecha_formateada(self, obj):
         # Formateo para que sea legible en el frontend

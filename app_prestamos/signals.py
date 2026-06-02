@@ -1,6 +1,6 @@
-from django.db.models.signals import post_save, pre_save
+from django.db.models.signals import post_save
 from django.dispatch import receiver
-from .models import Prestamo, Cuota, Caja, HistorialCuota 
+from .models import Prestamo, Cuota, Caja 
 
 @receiver(post_save, sender=Prestamo)
 def registrar_egreso_prestamo(sender, instance, created, **kwargs):
@@ -16,20 +16,20 @@ def registrar_egreso_prestamo(sender, instance, created, **kwargs):
 @receiver(post_save, sender=Cuota)
 def registrar_ingreso_cuota(sender, instance, created, **kwargs):
     # Verificamos si la cuota se marcó como pagada
-    if instance.esta_pagada:
-        descripcion_pago = f"Pago Cuota #{instance.numero_cuota} - Préstamo #{instance.prestamo.id}"
+    if instance.esta_pagada:   
+        descripcion_pago = f"Cobro Cuota #{instance.numero_cuota} - Prest #{instance.prestamo.id} - Cliente: {instance.prestamo.cliente.apellido}"
         
         # Evitamos duplicados en caja
         if not Caja.objects.filter(concepto=descripcion_pago).exists():
             # Calculamos la mora que se debió cobrar
             mora = instance.calcular_mora()
-            # El monto real que entra a caja es el total de la cuota + la mora
             monto_total_recibido = instance.monto_total + mora
             
             Caja.objects.create(
                 tipo='ingreso',
                 monto=monto_total_recibido,
-                concepto=descripcion_pago
+                concepto=descripcion_pago,
+                cuota=instance
             )
 
 

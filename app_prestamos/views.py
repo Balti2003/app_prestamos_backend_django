@@ -95,18 +95,12 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         cuota.fecha_pago_real = timezone.now().date()
         cuota.save()
 
-        # 2. Registramos el movimiento exacto en Caja
-        Caja.objects.create(
-            tipo='ingreso',
-            monto=cuota.monto_total,
-            concepto=f"Cobro Cuota #{cuota.numero_cuota} - Prest #{prestamo.id} - Cliente: {prestamo.cliente.apellido}"
-        )
-
-        # 3. Verificamos si con esta cuota se cerró el préstamo completo
+        # 2. Verificamos si con esta cuota se cerró el préstamo completo
         prestamo.check_finalizacion()
 
         return Response({
-            "message": f"Cuota #{cuota.numero_cuota} del Préstamo #{prestamo.id} registrada con éxito."
+            "message": f"Cuota #{cuota.numero_cuota} del Préstamo #{prestamo.id} registrada con éxito.",
+            "cuota_id": cuota.id
         })
 
 
