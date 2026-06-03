@@ -4,14 +4,25 @@ from django.db.models import Sum
 from django.utils import timezone
 from .models import Prestamo, Cuota, Cliente, Caja
 
-
 class DashboardResumenView(APIView):
     def get(self, request):
-        hoy = timezone.now().date()
+        hoy = timezone.localdate()
+        prestamos_a_revisar = Prestamo.objects.filter(estado='activo', activo=True)
         
-        # 1. Métricas de Capital (Lo que falta cobrar)
-        capital_en_la_calle = Cuota.objects.filter(esta_pagada=False).aggregate(Sum('monto_capital'))['monto_capital__sum'] or 0
-        intereses_por_cobrar = Cuota.objects.filter(esta_pagada=False).aggregate(Sum('monto_interes'))['monto_interes__sum'] or 0
+        for p in prestamos_a_revisar:
+            # Si tiene alguna cuota vencida no paga, pasamos el préstamo a mora
+            if p.cuotas.filter(esta_pagada=False, fecha_vencimiento__lt=hoy).exists():
+                p.estado = 'mora'
+                p.save()
+                
+        # 1. Métricas de Capital
+        # Optimizamos usando un solo query para capital e intereses
+        pendientes = Cuota.objects.filter(esta_pagada=False).aggregate(
+            cap=Sum('monto_capital'),
+            int=Sum('monto_interes')
+        )
+        capital_en_la_calle = pendientes['cap'] or 0
+        intereses_por_cobrar = pendientes['int'] or 0
         
         # 2. Estado de la Cartera
         prestamos_activos = Prestamo.objects.filter(activo=True, estado='activo').count()
@@ -21,21 +32,18 @@ class DashboardResumenView(APIView):
         cobranza_hoy_esperada = Cuota.objects.filter(
             fecha_vencimiento=hoy, 
             esta_pagada=False
-        ).aggregate(Sum('monto_total'))['monto_total__sum'] or 0
+        ).aggregate(total=Sum('monto_total'))['total'] or 0
         
         # 4. Caja y Rentabilidad REAL
         saldo_caja = Caja.saldo_actual()
 
-        # --- LÓGICA DE RENTABILIDAD ---
-        # Sumamos los intereses de todas las cuotas que ya fueron pagadas
-        cuotas_pagadas = Cuota.objects.filter(esta_pagada=True)
-        intereses_ya_cobrados = cuotas_pagadas.aggregate(Sum('monto_interes'))['monto_interes__sum'] or 0
+        # RENTABILIDAD OPTIMIZADA (Sumamos directamente los campos de la BD)
+        datos_pagados = Cuota.objects.filter(esta_pagada=True).aggregate(
+            int_cobrado=Sum('monto_interes'),
+            mora_cobrada=Sum('mora_pagada') # <--- Usamos el campo que creamos, no el método
+        )
         
-        # Opcional: Si quieres incluir la mora como ganancia
-        mora_ya_cobrada = sum(c.calcular_mora() for c in cuotas_pagadas)
-        
-        total_ganancia_real = intereses_ya_cobrados + mora_ya_cobrada
-        # ------------------------------
+        total_ganancia_real = (datos_pagados['int_cobrado'] or 0) + (datos_pagados['mora_cobrada'] or 0)
 
         # 5. Tasa de Mora
         total_pendientes = Cuota.objects.filter(esta_pagada=False).count()
@@ -56,6 +64,6 @@ class DashboardResumenView(APIView):
             },
             "operativo_hoy": {
                 "cobros_pendientes_hoy": float(cobranza_hoy_esperada),
-                "clientes_total": Cliente.objects.filter(activo=True).count() # Solo clientes activos
+                "clientes_total": Cliente.objects.filter(activo=True).count()
             }
         })

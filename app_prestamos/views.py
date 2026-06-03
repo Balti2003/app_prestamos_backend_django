@@ -14,7 +14,8 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from django.shortcuts import get_object_or_404
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from django.db.models import Sum
 
 
 class ClienteViewSet(viewsets.ModelViewSet):
@@ -99,49 +100,58 @@ class PrestamoViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def registrar_pago_exacto(self, request):
         cuota_id = request.data.get('cuota_id')
-        monto_enviado = request.data.get('monto')
+        monto_raw = request.data.get('monto') # Capturamos el dato crudo
         
         if not cuota_id:
             return Response({"error": "Debe proporcionar el ID de la cuota."}, status=400)
-            
+        
+        # --- VALIDACIÓN DE MONTO (Parte 1 robustecida) ---
+        if monto_raw is None or monto_raw == "":
+            return Response({"error": "El monto del pago es obligatorio y no fue recibido."}, status=400)
+
+        try:
+            # Limpiamos el valor por si el frontend envía el signo $ o comas de miles
+            monto_limpio = str(monto_raw).replace('$', '').replace(',', '').strip()
+            monto_enviado = Decimal(monto_limpio)
+        except (InvalidOperation, ValueError, TypeError):
+            return Response({"error": f"Formato de monto inválido recibido: {monto_raw}"}, status=400)
+        # -------------------------------------------------
+
         cuota = get_object_or_404(Cuota, id=cuota_id, esta_pagada=False)
         prestamo = cuota.prestamo
-
-        # Calculamos la mora en base a lo que realmente trajo el cliente
         monto_base = cuota.monto_total
-        mora_calculada = Decimal(str(monto_enviado)) - monto_base
+
+        # Calculamos la mora en base al monto verificado
+        mora_calculada = monto_enviado - monto_base
 
         # 1. Procesamos el pago guardando la mora de forma fija
         cuota.esta_pagada = True
-        cuota.fecha_pago_real = timezone.localtime(timezone.now()).date()
-        cuota.mora_pagada = max(Decimal('0.00'), mora_calculada) # Evitamos números negativos
+        cuota.fecha_pago_real = timezone.localdate() # Simplificado para fecha local
+        cuota.mora_pagada = max(Decimal('0.00'), mora_calculada) 
         cuota.save()
 
-        # 2. Registramos el movimiento en Caja por el monto TOTAL (9120)
-        Caja.objects.create(
-            tipo='ingreso',
-            monto=Decimal(str(monto_enviado)),
-            descripcion=f"Cobro Cuota #{cuota.numero_cuota} - Préstamo #{prestamo.id} (Mora: ${cuota.mora_pagada})"
-        )
-
-        # 3. Forzamos al préstamo a revisar su estado para que vuelva a estar "activo"
-        prestamo.actualizar_estado_mora() 
+        # 2. Forzamos al préstamo a revisar su estado
+        if hasattr(prestamo, 'actualizar_estado_mora'):
+            prestamo.actualizar_estado_mora() 
 
         return Response({
             "success": True,
             "message": "Pago asentado correctamente.",
-            "cuota_id": cuota.id
+            "cuota_id": cuota.id,
+            "monto_total": str(monto_enviado),
+            "mora_asentada": str(cuota.mora_pagada)
         }, status=200)
-    
+        
+        
     @action(detail=False, methods=['post'])
     def sincronizar_mora(self, request):
         prestamos_activos = Prestamo.objects.filter(estado__in=['activo', 'mora'])
         actualizados = 0
-        
+            
         for p in prestamos_activos:
             if p.actualizar_estado_mora():
                 actualizados += 1
-                
+                    
         return Response({
             "message": f"Sincronización completada. {actualizados} préstamos cambiaron de estado."
         })
@@ -288,3 +298,36 @@ class CuotaViewSet(viewsets.ModelViewSet):
 class CajaViewSet(viewsets.ModelViewSet):
     queryset = Caja.objects.all().order_by('-fecha') # Los últimos movimientos primero
     serializer_class = CajaSerializer
+
+class DashboardViewSet(viewsets.ViewSet):
+    """
+    Vista para obtener las estadísticas del Dashboard en tiempo real.
+    """
+    def list(self, request):
+        hoy = timezone.localdate()
+        
+        # 1. Cobros esperados HOY (Suma de cuotas que vencen hoy y no están pagas)
+        cobros_hoy = Cuota.objects.filter(
+            fecha_vencimiento=hoy, 
+            esta_pagada=False
+        ).aggregate(total=Sum('monto_total'))['total'] or Decimal('0.00')
+
+        # 2. Alerta Crítica (Cuentas que están actualmente en estado MORA)
+        cuentas_mora = Prestamo.objects.filter(estado='mora', activo=True).count()
+
+        # 3. Cartera Total (Clientes que tienen préstamos sin finalizar)
+        cartera_total = Cliente.objects.filter(
+            prestamos__estado__in=['activo', 'mora'],
+            activo=True
+        ).distinct().count()
+
+        # 4. Saldo en Caja (Usando el método que ya tenés en tu modelo Caja)
+        saldo_caja = Caja.saldo_actual()
+
+        return Response({
+            "cobros_esperados_hoy": float(cobros_hoy),
+            "cuentas_en_mora": cuentas_mora,
+            "cartera_total": cartera_total,
+            "saldo_caja": float(saldo_caja),
+            "ultima_actualizacion": timezone.localtime().strftime('%H:%M:%S')
+        })

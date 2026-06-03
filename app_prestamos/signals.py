@@ -15,22 +15,28 @@ def registrar_egreso_prestamo(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=Cuota)
 def registrar_ingreso_cuota(sender, instance, created, **kwargs):
-    # Verificamos si la cuota se marcó como pagada
-    if instance.esta_pagada:   
-        descripcion_pago = f"Cobro Cuota #{instance.numero_cuota} - Prest #{instance.prestamo.id} - Cliente: {instance.prestamo.cliente.apellido}"
+    # Solo actuamos si la cuota se marcó como pagada
+    if instance.esta_pagada:
+        descripcion_pago = (
+            f"COBRO CUOTA #{instance.numero_cuota} - "
+            f"PREST #{instance.prestamo.id} - "
+            f"CLIENTE: {instance.prestamo.cliente.apellido.upper()} "
+            f"(MORA: ${instance.mora_pagada:.2f})"
+        )
         
-        # Evitamos duplicados en caja
-        if not Caja.objects.filter(concepto=descripcion_pago).exists():
-            # Calculamos la mora que se debió cobrar
-            mora = instance.calcular_mora()
-            monto_total_recibido = instance.monto_total + mora
-            
+        # Usamos el campo mora_pagada que ya guardamos en el View
+        monto_total_recibido = instance.monto_total + instance.mora_pagada
+        
+        # Verificamos si ya existe para esta cuota específica (mejor que filtrar por texto)
+        if not Caja.objects.filter(cuota=instance).exists():
             Caja.objects.create(
                 tipo='ingreso',
                 monto=monto_total_recibido,
                 concepto=descripcion_pago,
                 cuota=instance
             )
+        
+        instance.prestamo.check_finalizacion()
 
 
 """ @receiver(pre_save, sender=Cuota)

@@ -1,22 +1,22 @@
+from django.utils import timezone
 from rest_framework import serializers
 from .models import Cliente, Prestamo, Cuota, Caja
 
 class ClienteSerializer(serializers.ModelSerializer):
+    prestamos_activos = serializers.SerializerMethodField()
     tiene_mora = serializers.SerializerMethodField()
     
     class Meta:
         model = Cliente
-        fields = ['id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 'tiene_mora']
+        fields = ['id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 'tiene_mora', 'prestamos_activos']
     
     def get_tiene_mora(self, obj):
-        # Buscamos si el cliente tiene al menos una cuota vencida sin pagar
-        from .models import Cuota
         from django.utils import timezone
-        return Cuota.objects.filter(
-            prestamo__cliente=obj,
-            esta_pagada=False,
-            fecha_vencimiento__lt=timezone.localdate()
-        ).exists()
+        return obj.prestamos.filter(cuotas__esta_pagada=False, cuotas__fecha_vencimiento__lt=timezone.localdate()).exists()
+
+    def get_prestamos_activos(self, obj):
+        prestamos = obj.prestamos.filter(estado__in=['activo', 'mora'], activo=True)
+        return PrestamoMiniSerializer(prestamos, many=True).data
 
 
 class CuotaSerializer(serializers.ModelSerializer):
@@ -73,7 +73,11 @@ class CajaSerializer(serializers.ModelSerializer):
     class Meta:
         model = Caja
         fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada', 'cuota_id']
-    
+        
     def get_fecha_formateada(self, obj):
-        # Formateo para que sea legible en el frontend
-        return obj.fecha.strftime("%d/%m/%Y %H:%M")
+        if obj.fecha:
+            # 1. Convertimos la hora UTC de la base de datos a la hora local configurada (America/Argentina/Cordoba)
+            fecha_local = timezone.localtime(obj.fecha)
+            # 2. La formateamos exactamente como la tenías en la tabla
+            return fecha_local.strftime('%d/%m/%Y %H:%M')
+        return "---"

@@ -30,7 +30,6 @@ class Prestamo(models.Model):
         ('mensual', 'Mensual'),
     )
     ESTADOS = (
-        ('pendiente', 'Pendiente de Aprobación'),
         ('activo', 'Activo'),
         ('mora', 'En Mora'),
         ('finalizado', 'Finalizado'),
@@ -42,7 +41,7 @@ class Prestamo(models.Model):
     cuotas_totales = models.PositiveIntegerField()
     frecuencia = models.CharField(max_length=10, choices=FRECUENCIAS, default='mensual')
     fecha_inicio = models.DateField(default=timezone.now)
-    estado = models.CharField(max_length=15, choices=ESTADOS, default='pendiente')
+    estado = models.CharField(max_length=15, choices=ESTADOS, default='activo')
     activo = models.BooleanField(default=True)
     
     def delete(self, *args, **kwargs ):
@@ -51,9 +50,8 @@ class Prestamo(models.Model):
     
     def generar_plan_pagos(self):
         """
-        Calcula y crea las cuotas usando Interés Directo.
+        Calcula y crea las cuotas usando Interés Directo con frecuencia dinámica.
         """
-        # Interés total = Capital * (Tasa / 100)
         interes_total_monetario = self.monto_solicitado * (self.tasa_interes / Decimal('100'))
         monto_total_a_pagar = self.monto_solicitado + interes_total_monetario
         
@@ -61,15 +59,17 @@ class Prestamo(models.Model):
         capital_por_cuota = self.monto_solicitado / self.cuotas_totales
         interes_por_cuota = interes_total_monetario / self.cuotas_totales
 
+        # Normalizamos la frecuencia para evitar errores de mayúsculas/minúsculas
+        frec_aux = self.frecuencia.lower() if self.frecuencia else 'mensual'
+
         for i in range(1, self.cuotas_totales + 1):
-            # Calculamos la fecha según la frecuencia real
-            if self.frecuencia == 'diario':
+            if frec_aux == 'diario':
                 fecha_venc = self.fecha_inicio + relativedelta(days=i)
-            elif self.frecuencia == 'semanal':
+            elif frec_aux == 'semanal':
                 fecha_venc = self.fecha_inicio + relativedelta(weeks=i)
-            elif self.frecuencia == 'quincenal':
+            elif frec_aux == 'quincenal':
                 fecha_venc = self.fecha_inicio + relativedelta(days=i*15)
-            else: # mensual
+            else: # mensual o cualquier otro caso
                 fecha_venc = self.fecha_inicio + relativedelta(months=i)
 
             Cuota.objects.create(
@@ -80,15 +80,27 @@ class Prestamo(models.Model):
                 monto_total=monto_cuota,
                 fecha_vencimiento=fecha_venc
             )
-    
+            
     @property
     def saldo_pendiente(self):
         return self.plan_pagos.filter(esta_pagada=False).aggregate(models.Sum('monto_total'))['monto_total__sum'] or 0
 
     def check_finalizacion(self):
-        if not self.plan_pagos.filter(esta_pagada=False).exists():
+        """
+        Controla si el préstamo llegó a su fin. 
+        Se ejecuta de manera automática inmediatamente después de registrar un pago exacto.
+        """
+        # Contamos directamente cuántas cuotas quedan sin abonar utilizando la relación inversa corregida
+        cuotas_pendientes = self.cuotas.filter(esta_pagada=False).count()
+        
+        if cuotas_pendientes == 0:
             self.estado = 'finalizado'
             self.save()
+            print(f"--> [SISTEMA] Préstamo #{self.id} completado. Estado actualizado a FINALIZADO.")
+        else:
+            # Si todavía le quedan cuotas por delante, recalculamos si el legajo sigue en mora o vuelve a activo
+            if hasattr(self, 'actualizar_estado_mora'):
+                self.actualizar_estado_mora()
             
     def save(self, *args, **kwargs):
         if self.pk: # Si el préstamo ya existe (es una actualización)
