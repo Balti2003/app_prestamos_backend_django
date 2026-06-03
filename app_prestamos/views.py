@@ -14,6 +14,7 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from django.shortcuts import get_object_or_404
+from decimal import Decimal
 
 
 class ClienteViewSet(viewsets.ModelViewSet):
@@ -23,24 +24,39 @@ class ClienteViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def cuotas_cobrables(self, request, pk=None):
         cliente = self.get_object()
-        # Buscamos préstamos que no estén finalizados ni pendientes
-        prestamos = cliente.prestamos.filter(estado__in=['pendiente', 'activo', 'mora'], activo=True)
+        # Filtramos préstamos activos o en mora
+        prestamos = cliente.prestamos.filter(estado__in=['activo', 'mora'], activo=True)
         
         proximas_cuotas = []
+        hoy = timezone.localdate()
+
         for p in prestamos:
-            # Traemos la cuota más vieja sin pagar de ESTE préstamo
-            cuota = p.plan_pagos.filter(esta_pagada=False).order_by('numero_cuota').first()
+            cuota = p.cuotas.filter(esta_pagada=False).order_by('numero_cuota').first()
+            
             if cuota:
+                monto_base = cuota.monto_total
+                mora_acumulada = Decimal('0.00')
+                dias_atraso = 0
+
+                if cuota.fecha_vencimiento < hoy:
+                    dias_atraso = (hoy - cuota.fecha_vencimiento).days
+                    # Calculamos mora (ejemplo 1% diario)
+                    tasa_diaria = Decimal('0.01') 
+                    mora_acumulada = monto_base * tasa_diaria * dias_atraso
+
                 proximas_cuotas.append({
                     "cuota_id": cuota.id,
                     "prestamo_id": p.id,
                     "numero_cuota": cuota.numero_cuota,
-                    "monto": str(cuota.monto_total),
-                    "prestamo_nombre": f"Préstamo #{p.id} - Valor Cuota: ${cuota.monto_total}"
+                    "monto_base": str(monto_base),
+                    "monto": str(monto_base + mora_acumulada),
+                    "mora": str(mora_acumulada),
+                    "dias_atraso": dias_atraso,
+                    "fecha_vencimiento": cuota.fecha_vencimiento,
+                    "prestamo_nombre": f"Préstamo #{p.id}"
                 })
-                
+        
         return Response(proximas_cuotas)
-
 
 class PrestamoViewSet(viewsets.ModelViewSet):
     queryset = Prestamo.objects.filter(activo=True)
@@ -79,28 +95,55 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
+
     @action(detail=False, methods=['post'])
     def registrar_pago_exacto(self, request):
         cuota_id = request.data.get('cuota_id')
+        monto_enviado = request.data.get('monto')
         
         if not cuota_id:
-            return Response({"error": "Debe proporcionar el ID de la cuota a pagar."}, status=400)
+            return Response({"error": "Debe proporcionar el ID de la cuota."}, status=400)
             
-        # Buscamos la cuota exacta. Si ya está paga, tira error.
         cuota = get_object_or_404(Cuota, id=cuota_id, esta_pagada=False)
         prestamo = cuota.prestamo
 
-        # 1. Procesamos el pago de la cuota
+        # Calculamos la mora en base a lo que realmente trajo el cliente
+        monto_base = cuota.monto_total
+        mora_calculada = Decimal(str(monto_enviado)) - monto_base
+
+        # 1. Procesamos el pago guardando la mora de forma fija
         cuota.esta_pagada = True
-        cuota.fecha_pago_real = timezone.now().date()
+        cuota.fecha_pago_real = timezone.localtime(timezone.now()).date()
+        cuota.mora_pagada = max(Decimal('0.00'), mora_calculada) # Evitamos números negativos
         cuota.save()
 
-        # 2. Verificamos si con esta cuota se cerró el préstamo completo
-        prestamo.check_finalizacion()
+        # 2. Registramos el movimiento en Caja por el monto TOTAL (9120)
+        Caja.objects.create(
+            tipo='ingreso',
+            monto=Decimal(str(monto_enviado)),
+            descripcion=f"Cobro Cuota #{cuota.numero_cuota} - Préstamo #{prestamo.id} (Mora: ${cuota.mora_pagada})"
+        )
+
+        # 3. Forzamos al préstamo a revisar su estado para que vuelva a estar "activo"
+        prestamo.actualizar_estado_mora() 
 
         return Response({
-            "message": f"Cuota #{cuota.numero_cuota} del Préstamo #{prestamo.id} registrada con éxito.",
+            "success": True,
+            "message": "Pago asentado correctamente.",
             "cuota_id": cuota.id
+        }, status=200)
+    
+    @action(detail=False, methods=['post'])
+    def sincronizar_mora(self, request):
+        prestamos_activos = Prestamo.objects.filter(estado__in=['activo', 'mora'])
+        actualizados = 0
+        
+        for p in prestamos_activos:
+            if p.actualizar_estado_mora():
+                actualizados += 1
+                
+        return Response({
+            "message": f"Sincronización completada. {actualizados} préstamos cambiaron de estado."
         })
 
 
@@ -170,6 +213,7 @@ class CuotaViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
+        
     @action(detail=True, methods=['get'])
     def generar_recibo(self, request, pk=None):
         cuota = self.get_object()
@@ -184,8 +228,9 @@ class CuotaViewSet(viewsets.ModelViewSet):
         # --- ENCABEZADO ---
         titulo_style = ParagraphStyle('TituloStyle', parent=styles['Heading1'], fontSize=18, alignment=1, spaceAfter=20)
         elements.append(Paragraph("COMPROBANTE DE PAGO", titulo_style))
-        elements.append(Paragraph(f"<b>Sistema de Gestión de Préstamos</b>", styles['Normal']))
-        elements.append(Paragraph(f"Fecha de emisión: {timezone.now().strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
+        elements.append(Paragraph("<b>Sistema de Gestión de Préstamos</b>", styles['Normal']))
+        fecha_local = timezone.localtime(timezone.now())
+        elements.append(Paragraph(f"Fecha de emisión: {fecha_local.strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
         elements.append(Spacer(1, 20))
 
         # --- DATOS DEL CLIENTE Y PRÉSTAMO ---
@@ -199,8 +244,8 @@ class CuotaViewSet(viewsets.ModelViewSet):
         elements.append(t_cliente)
         elements.append(Spacer(1, 20))
 
-        # --- DETALLE DEL PAGO (TABLA) ---
-        mora = cuota.calcular_mora()
+        # --- DETALLE DEL PAGO CORREGIDO ---
+        mora = cuota.mora_pagada
         total = cuota.monto_total + mora
         
         data_pago = [
@@ -234,13 +279,11 @@ class CuotaViewSet(viewsets.ModelViewSet):
         nota_style = ParagraphStyle('NotaStyle', parent=styles['Normal'], fontSize=8, textColor=colors.grey)
         elements.append(Paragraph("Este documento sirve como comprobante legal de pago para el período mencionado. Conserve este recibo para cualquier reclamo futuro.", nota_style))
 
-        # Construir PDF
         doc.build(elements)
         buffer.seek(0)
         
-        filename = f"Recibo_P# {cuota.prestamo.id}_C# {cuota.numero_cuota}.pdf"
+        filename = f"Recibo_P#{cuota.prestamo.id}_C#{cuota.numero_cuota}.pdf"
         return HttpResponse(buffer, content_type='application/pdf', headers={'Content-Disposition': f'attachment; filename="{filename}"'})
-
 
 class CajaViewSet(viewsets.ModelViewSet):
     queryset = Caja.objects.all().order_by('-fecha') # Los últimos movimientos primero

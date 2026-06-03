@@ -2,16 +2,22 @@ from rest_framework import serializers
 from .models import Cliente, Prestamo, Cuota, Caja
 
 class ClienteSerializer(serializers.ModelSerializer):
-    prestamos_activos = serializers.SerializerMethodField()
+    tiene_mora = serializers.SerializerMethodField()
     
     class Meta:
         model = Cliente
-        fields = ['id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 'prestamos_activos']
+        fields = ['id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 'tiene_mora']
     
-    def get_prestamos_activos(self, obj):
-        # Filtramos solo los que no están finalizados
-        prestamos = obj.prestamos.exclude(estado='finalizado') 
-        return PrestamoMiniSerializer(prestamos, many=True).data
+    def get_tiene_mora(self, obj):
+        # Buscamos si el cliente tiene al menos una cuota vencida sin pagar
+        from .models import Cuota
+        from django.utils import timezone
+        return Cuota.objects.filter(
+            prestamo__cliente=obj,
+            esta_pagada=False,
+            fecha_vencimiento__lt=timezone.localdate()
+        ).exists()
+
 
 class CuotaSerializer(serializers.ModelSerializer):
     # Incluimos el cálculo de mora que definimos en el modelo
@@ -53,11 +59,11 @@ class PrestamoMiniSerializer(serializers.ModelSerializer):
 
     def get_cuotas_pagadas(self, obj):
         # Contamos cuántas cuotas tienen esta_pagada=True
-        return obj.plan_pagos.filter(esta_pagada=True).count()
+        return obj.cuotas.filter(esta_pagada=True).count()
 
     def get_monto_cuota(self, obj):
         # Tomamos el monto_total de la primera cuota del plan
-        cuota = obj.plan_pagos.first()
+        cuota = obj.cuotas.first()
         return cuota.monto_total if cuota else 0
 
 class CajaSerializer(serializers.ModelSerializer):

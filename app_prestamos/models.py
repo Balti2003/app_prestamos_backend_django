@@ -3,7 +3,7 @@ from django.db import models
 from datetime import timedelta
 from django.utils import timezone
 from django.db.models import Sum
-
+from dateutil.relativedelta import relativedelta
         
 class Cliente(models.Model):
     nombre = models.CharField(max_length=100)
@@ -62,15 +62,15 @@ class Prestamo(models.Model):
         interes_por_cuota = interes_total_monetario / self.cuotas_totales
 
         for i in range(1, self.cuotas_totales + 1):
-            # Calcular fecha de vencimiento según frecuencia
+            # Calculamos la fecha según la frecuencia real
             if self.frecuencia == 'diario':
-                dias_a_sumar = i
+                fecha_venc = self.fecha_inicio + relativedelta(days=i)
             elif self.frecuencia == 'semanal':
-                dias_a_sumar = i * 7
+                fecha_venc = self.fecha_inicio + relativedelta(weeks=i)
+            elif self.frecuencia == 'quincenal':
+                fecha_venc = self.fecha_inicio + relativedelta(days=i*15)
             else: # mensual
-                dias_a_sumar = i * 30
-            
-            fecha_venc = self.fecha_inicio + timedelta(days=dias_a_sumar)
+                fecha_venc = self.fecha_inicio + relativedelta(months=i)
 
             Cuota.objects.create(
                 prestamo=self,
@@ -96,13 +96,40 @@ class Prestamo(models.Model):
             if original.estado != self.estado:
                 pass 
         super().save(*args, **kwargs)
+    
+    def actualizar_estado_mora(self):
+        """
+        Revisa si el préstamo tiene cuotas vencidas no pagadas.
+        Si encuentra al menos una, cambia el estado a 'mora'.
+        """
+        hoy = timezone.localdate()
+        
+        # Buscamos si hay alguna cuota cuya fecha de vencimiento ya pasó y no está pagada
+        cuotas_vencidas = self.cuotas.filter(
+            fecha_vencimiento__lt=hoy, 
+            esta_pagada=False
+        ).exists()
+
+        if cuotas_vencidas:
+            if self.estado != 'mora':
+                self.estado = 'mora'
+                self.save()
+                return True
+        else:
+            # Si no hay vencidas, pero estaba en mora (porque quizás se puso al día)
+            # lo devolvemos a 'activo'
+            if self.estado == 'mora':
+                self.estado = 'activo'
+                self.save()
+                return True
+        return False
         
     def __str__(self):
         return f"Préstamo #{self.id} - {self.cliente.apellido}"
 
 
 class Cuota(models.Model):
-    prestamo = models.ForeignKey(Prestamo, on_delete=models.CASCADE, related_name='plan_pagos')
+    prestamo = models.ForeignKey(Prestamo, on_delete=models.CASCADE, related_name='cuotas')
     numero_cuota = models.PositiveIntegerField()
     monto_capital = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     monto_interes = models.DecimalField(max_digits=12, decimal_places=2, default=0)
@@ -110,6 +137,7 @@ class Cuota(models.Model):
     fecha_vencimiento = models.DateField()
     fecha_pago_real = models.DateField(null=True, blank=True)
     esta_pagada = models.BooleanField(default=False)
+    mora_pagada = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
 
     def __str__(self):
         return f"Cuota {self.numero_cuota} de {self.prestamo}"
