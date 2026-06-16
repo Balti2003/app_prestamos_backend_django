@@ -1,7 +1,7 @@
 from rest_framework import viewsets, status, filters
 from rest_framework.response import Response
 from .models import Cliente, Prestamo, Cuota, Caja, HistorialCuota
-from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer, CajaSerializer
+from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer, CajaSerializer, ClientePerfilSerializer
 from rest_framework.decorators import action
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -20,7 +20,13 @@ from django.db.models import Sum
 
 class ClienteViewSet(viewsets.ModelViewSet):
     queryset = Cliente.objects.filter(activo=True)
-    serializer_class = ClienteSerializer
+    
+    def get_serializer_class(self):
+        # Si están pidiendo el detalle de un cliente
+        if self.action == 'retrieve':
+            return ClientePerfilSerializer
+        # Para el listado general (/api/clientes/) usa el básico de siempre
+        return ClienteSerializer
 
     @action(detail=True, methods=['get'])
     def cuotas_cobrables(self, request, pk=None):

@@ -1,6 +1,7 @@
 from django.utils import timezone
 from rest_framework import serializers
 from .models import Cliente, Prestamo, Cuota, Caja
+from django.db.models import Sum
 
 class ClienteSerializer(serializers.ModelSerializer):
     prestamos_activos = serializers.SerializerMethodField()
@@ -81,3 +82,64 @@ class CajaSerializer(serializers.ModelSerializer):
             # 2. La formateamos exactamente como la tenías en la tabla
             return fecha_local.strftime('%d/%m/%Y %H:%M')
         return "---"
+
+class HistorialPagosSerializer(serializers.ModelSerializer):
+    """Serializer para listar el historial cronológico de pagos del cliente"""
+    prestamo_id = serializers.ReadOnlyField(source='prestamo.id')
+    
+    class Meta:
+        model = Cuota
+        fields = ['id', 'prestamo_id', 'numero_cuota', 'monto_total', 'mora_pagada', 'fecha_pago_real']
+
+class ClientePerfilSerializer(serializers.ModelSerializer):
+    prestamos_activos = serializers.SerializerMethodField()
+    metricas_comportamiento = serializers.SerializerMethodField()
+    historial_pagos = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Cliente
+        fields = [
+            'id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 
+            'prestamos_activos', 'metricas_comportamiento', 'historial_pagos'
+        ]
+
+    def get_prestamos_activos(self, obj):
+        # Usamos el PrestamoMiniSerializer
+        prestamos = obj.prestamos.filter(estado__in=['activo', 'mora'], activo=True)
+        return PrestamoMiniSerializer(prestamos, many=True).data
+
+    def get_metricas_comportamiento(self, obj):
+        # Todas las cuotas pagadas históricas de este cliente
+        cuotas_pagadas = Cuota.objects.filter(prestamo__cliente=obj, esta_pagada=True)
+        
+        total_pagadas = cuotas_pagadas.count()
+        # Una cuota se pagó con mora si el campo mora_pagada es mayor a cero
+        pagadas_con_mora = cuotas_pagadas.filter(mora_pagada__gt=0).count()
+        pagadas_a_tiempo = total_pagadas - pagadas_con_mora
+
+        # Calcular ganancias generadas por este cliente específico
+        ganancias = cuotas_pagadas.aggregate(
+            intereses=Sum('monto_interes'),
+            mora=Sum('mora_pagada')
+        )
+        total_ganancia = (ganancias['intereses'] or 0) + (ganancias['mora'] or 0)
+
+        # Calcular porcentaje de puntualidad
+        tasa_puntualidad = (pagadas_a_tiempo / total_pagadas * 100) if total_pagadas > 0 else 100
+
+        return {
+            "total_prestamos": obj.prestamos.filter(activo=True).count(),
+            "cuotas_pagadas_total": total_pagadas,
+            "cuotas_a_tiempo": pagadas_a_tiempo,
+            "cuotas_con_mora": pagadas_con_mora,
+            "tasa_puntualidad_porcentaje": round(tasa_puntualidad, 1),
+            "ganancia_generada": float(total_ganancia)
+        }
+
+    def get_historial_pagos(self, obj):
+        # Traemos todos los pagos ordenados desde el más reciente al más viejo
+        cuotas = Cuota.objects.filter(
+            prestamo__cliente=obj, 
+            esta_pagada=True
+        ).order_by('-fecha_pago_real')
+        return HistorialPagosSerializer(cuotas, many=True).data
