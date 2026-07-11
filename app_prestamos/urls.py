@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import ClienteViewSet, PrestamoViewSet, CuotaViewSet, CajaViewSet
 from .dashboard_views import DashboardResumenView
+from .views import CambiarPasswordView
 
 router = DefaultRouter()
 router.register(r'clientes', ClienteViewSet)
@@ -12,4 +13,5 @@ router.register(r'caja', CajaViewSet)
 urlpatterns = [
     path('', include(router.urls)),
     path('dashboard/resumen/', DashboardResumenView.as_view(), name='dashboard-resumen'),
+    path('usuario/cambiar-password/', CambiarPasswordView.as_view(), name='cambiar-password'),
 ]

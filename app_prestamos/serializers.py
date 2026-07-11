@@ -2,6 +2,7 @@ from django.utils import timezone
 from rest_framework import serializers
 from .models import Cliente, Prestamo, Cuota, Caja
 from django.db.models import Sum
+from django.contrib.auth.password_validation import validate_password
 
 class ClienteSerializer(serializers.ModelSerializer):
     prestamos_activos = serializers.SerializerMethodField()
@@ -143,3 +144,18 @@ class ClientePerfilSerializer(serializers.ModelSerializer):
             esta_pagada=True
         ).order_by('-fecha_pago_real')
         return HistorialPagosSerializer(cuotas, many=True).data
+    
+class CambiarPasswordSerializer(serializers.Serializer):
+    old_password = serializers.CharField(required=True, write_only=True)
+    new_password = serializers.CharField(required=True, write_only=True)
+
+    def validate_old_password(self, value):
+        user = self.context['request'].user
+        if not user.check_password(value):
+            raise serializers.ValidationError("La contraseña actual es incorrecta.")
+        return value
+
+    def validate_new_password(self, value):
+        # Valida que cumpla las políticas de seguridad de Django (longitud, caracteres, etc.)
+        validate_password(value, user=self.context['request'].user)
+        return value

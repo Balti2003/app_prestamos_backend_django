@@ -16,6 +16,9 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from django.shortcuts import get_object_or_404
 from decimal import Decimal, InvalidOperation
 from django.db.models import Sum
+from rest_framework.permissions import IsAuthenticated
+from .serializers import CambiarPasswordSerializer
+from rest_framework.views import APIView
 
 
 class ClienteViewSet(viewsets.ModelViewSet):
@@ -337,3 +340,23 @@ class DashboardViewSet(viewsets.ViewSet):
             "saldo_caja": float(saldo_caja),
             "ultima_actualizacion": timezone.localtime().strftime('%H:%M:%S')
         })
+
+class CambiarPasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        serializer = CambiarPasswordSerializer(data=request.data, context={'request': request})
+        
+        if serializer.is_valid():
+            user = request.user
+            user.set_password(serializer.validated_data['new_password'])
+            user.save()
+            
+            return Response(
+                {"message": "Contraseña actualizada correctamente."}, 
+                status=status.HTTP_200_OK
+            )
+            
+        # Retornamos el primer error que encontremos para simplificar el mensaje en el frontend
+        error_msg = list(serializer.errors.values())[0][0]
+        return Response({"error": error_msg}, status=status.HTTP_400_BAD_REQUEST)
