@@ -1,7 +1,9 @@
+from xml.dom import ValidationErr
+
 from rest_framework import viewsets, status, filters
 from rest_framework.response import Response
-from .models import Cliente, Prestamo, Cuota, Caja, HistorialCuota
-from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer, CajaSerializer, ClientePerfilSerializer
+from .models import Cliente, Prestamo, Cuota, Caja, HistorialCuota, CajaDiaria
+from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer, CajaSerializer, ClientePerfilSerializer, CajaDiariaSerializer
 from rest_framework.decorators import action
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -360,3 +362,96 @@ class CambiarPasswordView(APIView):
         # Retornamos el primer error que encontremos para simplificar el mensaje en el frontend
         error_msg = list(serializer.errors.values())[0][0]
         return Response({"error": error_msg}, status=status.HTTP_400_BAD_REQUEST)
+
+class CajaDiariaViewSet(viewsets.ModelViewSet):
+    queryset = CajaDiaria.objects.all()
+    serializer_class = CajaDiariaSerializer
+    permission_classes = [IsAuthenticated]
+
+    # Endpoint para consultar el estado de la caja actual
+    @action(detail=False, methods=['get'])
+    def estado_actual(self, request):
+        caja_abierta = CajaDiaria.objects.filter(estado='ABIERTA').first()
+        if caja_abierta:
+            # Calculamos dinámicamente cómo va la caja en tiempo real
+            ingresos = sum(mov.monto for mov in caja_abierta.movimientos.filter(tipo='ingreso'))
+            egresos = sum(mov.monto for mov in caja_abierta.movimientos.filter(tipo='egreso'))
+            estimado = caja_abierta.saldo_apertura + ingresos - egresos
+            
+            return Response({
+                'caja_abierta': True,
+                'id': caja_abierta.id,
+                'fecha': caja_abierta.fecha,
+                'saldo_apertura': caja_abierta.saldo_apertura,
+                'ingresos_sistema': ingresos,
+                'egresos_sistema': egresos,
+                'saldo_estimado': estimado,
+                'operador_apertura': caja_abierta.operador_apertura.username
+            })
+        
+        # Si no hay caja abierta, buscamos el saldo del último cierre para proponerlo como apertura
+        ultima_caja = CajaDiaria.objects.filter(estado='CERRADA').first()
+        saldo_sugerido = ultima_caja.saldo_real_fisico if ultima_caja else 0.00
+        
+        return Response({
+            'caja_abierta': False,
+            'saldo_sugerido': saldo_sugerido
+        })
+
+    # Endpoint para abrir la caja diaria
+    @action(detail=False, methods=['post'])
+    def abrir_caja(self, request):
+        saldo_inicial = request.data.get('saldo_apertura', 0.00)
+        
+        try:
+            with transaction.atomic():
+                nueva_caja = CajaDiaria(
+                    operador_apertura=request.user,
+                    saldo_apertura=saldo_inicial,
+                    estado='ABIERTA'
+                )
+                nueva_caja.full_clean() # Valida que no haya otra abierta
+                nueva_caja.save()
+                
+                serializer = self.get_serializer(nueva_caja)
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+        except ValidationErr as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Endpoint para cerrar la caja del día (Arqueo)
+    @action(detail=True, methods=['post'])
+    def cerrar_caja(self, request, pk=None):
+        caja = self.get_object()
+        saldo_fisico = request.data.get('saldo_real_fisico')
+        observaciones = request.data.get('observaciones', '')
+
+        if not saldo_fisico:
+            return Response({'error': 'Debes proveer el saldo real físico contado de la caja.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if caja.estado == 'CERRADA':
+            return Response({'error': 'Esta caja ya se encuentra cerrada.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                # 1. Calculamos ingresos y egresos del día según los movimientos asociados
+                ingresos = sum(mov.monto for mov in caja.movimientos.filter(tipo='ingreso'))
+                egresos = sum(mov.monto for mov in caja.movimientos.filter(tipo='egreso'))
+                
+                caja.ingresos_sistema = ingresos
+                caja.egresos_sistema = egresos
+                caja.saldo_estimado = caja.saldo_apertura + ingresos - egresos
+                
+                # 2. Registramos el conteo físico y la diferencia (sobrante/faltante)
+                caja.saldo_real_fisico = saldo_fisico
+                caja.diferencia = caja.saldo_real_fisico - caja.saldo_estimado
+                
+                caja.observaciones = observaciones
+                caja.operador_cierre = request.user
+                caja.fecha_cierre = timezone.now()
+                caja.estado = 'CERRADA'
+                caja.save()
+
+                serializer = self.get_serializer(caja)
+                return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

@@ -3,6 +3,7 @@ from rest_framework import serializers
 from .models import Cliente, Prestamo, Cuota, Caja
 from django.db.models import Sum
 from django.contrib.auth.password_validation import validate_password
+from .models import CajaDiaria
 
 class ClienteSerializer(serializers.ModelSerializer):
     prestamos_activos = serializers.SerializerMethodField()
@@ -159,3 +160,11 @@ class CambiarPasswordSerializer(serializers.Serializer):
         # Valida que cumpla las políticas de seguridad de Django (longitud, caracteres, etc.)
         validate_password(value, user=self.context['request'].user)
         return value
+
+class CajaDiariaSerializer(serializers.ModelSerializer):
+    operador_apertura_nombre = serializers.ReadOnlyField(source='operador_apertura.username')
+    operador_cierre_nombre = serializers.ReadOnlyField(source='operador_cierre.username')
+
+    class Meta:
+        model = CajaDiaria
+        fields = '__all__'

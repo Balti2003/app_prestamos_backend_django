@@ -1,10 +1,12 @@
 from decimal import Decimal
 from django.db import models
-from datetime import timedelta
 from django.utils import timezone
 from django.db.models import Sum
 from dateutil.relativedelta import relativedelta
-        
+from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
+
+
 class Cliente(models.Model):
     nombre = models.CharField(max_length=100)
     apellido = models.CharField(max_length=100)
@@ -188,12 +190,32 @@ class Caja(models.Model):
     concepto = models.CharField(max_length=255)
     fecha = models.DateTimeField(auto_now_add=True)
     cuota = models.ForeignKey('Cuota', on_delete=models.SET_NULL, null=True, blank=True)
+    caja_diaria = models.ForeignKey(
+        'CajaDiaria', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='movimientos'
+    )
 
     @classmethod
     def saldo_actual(cls):
         ingresos = cls.objects.filter(tipo='ingreso').aggregate(total=Sum('monto'))['total'] or 0
         egresos = cls.objects.filter(tipo='egreso').aggregate(total=Sum('monto'))['total'] or 0
         return ingresos - egresos
+    
+    def save(self, *args, **kwargs):
+        # Si es un registro nuevo (no una actualización)
+        if not self.pk:
+            # Buscamos la caja diaria que esté abierta hoy
+            caja_activa = CajaDiaria.objects.filter(estado='ABIERTA').first()
+            
+            if not caja_activa:
+                raise ValidationError("No se puede registrar este movimiento porque no hay ninguna Caja Diaria abierta hoy.")
+            
+            # Asociamos automáticamente este movimiento a la caja activa
+            self.caja_diaria = caja_activa
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.tipo.upper()} - {self.monto} ({self.fecha.strftime('%d/%m/%Y')})" 
@@ -208,3 +230,43 @@ class HistorialEstado(models.Model):
 
     def __str__(self):
         return f"{self.prestamo} cambió a {self.estado_nuevo} el {self.fecha_cambio}"
+
+
+class CajaDiaria(models.Model):
+    ESTADO_CHOICES = [
+        ('ABIERTA', 'Abierta'),
+        ('CERRADA', 'Cerrada'),
+    ]
+
+    fecha = models.DateField(auto_now_add=True, unique=True, verbose_name="Fecha de Operación")
+    operador_apertura = models.ForeignKey(User, on_delete=models.PROTECT, related_name='cajas_abiertas')
+    operador_cierre = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name='cajas_cerradas')
+    
+    fecha_apertura = models.DateTimeField(auto_now_add=True)
+    fecha_cierre = models.DateTimeField(null=True, blank=True)
+    
+    # Valores Monetarios (Decimal para evitar problemas de redondeo de punto flotante)
+    saldo_apertura = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    ingresos_sistema = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    egresos_sistema = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    saldo_estimado = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    saldo_real_fisico = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    
+    diferencia = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    estado = models.CharField(max_length=10, choices=ESTADO_CHOICES, default='ABIERTA')
+    observaciones = models.TextField(blank=True, null=True, help_text="Comentarios en caso de que haya diferencias")
+
+    class Meta:
+        ordering = ['-fecha']
+        verbose_name = "Caja Diaria"
+        verbose_name_plural = "Cajas Diarias"
+
+    def __str__(self):
+        return f"Caja {self.fecha} ({self.estado})"
+
+    def clean(self):
+        # Regla estricta: No permitir más de una caja abierta al mismo tiempo
+        if self.estado == 'ABIERTA':
+            cajas_abiertas = CajaDiaria.objects.filter(estado='ABIERTA').exclude(id=self.id)
+            if cajas_abiertas.exists():
+                raise ValidationError("Ya existe una caja abierta en el sistema. Debes cerrarla antes de iniciar una nueva.")
