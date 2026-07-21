@@ -72,10 +72,11 @@ class PrestamoMiniSerializer(serializers.ModelSerializer):
 class CajaSerializer(serializers.ModelSerializer):
     fecha_formateada = serializers.SerializerMethodField()
     cuota_id = serializers.ReadOnlyField(source='cuota.id')
+    prestamo_id = serializers.ReadOnlyField(source='prestamo.id')
 
     class Meta:
         model = Caja
-        fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada', 'cuota_id']
+        fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada', 'cuota_id', 'prestamo_id']
         
     def get_fecha_formateada(self, obj):
         if obj.fecha:

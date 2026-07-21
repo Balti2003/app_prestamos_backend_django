@@ -1,5 +1,4 @@
 from xml.dom import ValidationErr
-
 from rest_framework import viewsets, status, filters
 from rest_framework.response import Response
 from .models import Cliente, Prestamo, Cuota, Caja, HistorialCuota, CajaDiaria
@@ -21,7 +20,7 @@ from django.db.models import Sum
 from rest_framework.permissions import IsAuthenticated
 from .serializers import CambiarPasswordSerializer
 from rest_framework.views import APIView
-
+from .utils import generar_pdf_desembolso_seguro
 
 class ClienteViewSet(viewsets.ModelViewSet):
     queryset = Cliente.objects.filter(activo=True)
@@ -106,6 +105,21 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    @action(detail=True, methods=['get'], url_path='comprobante-desembolso')
+    def generar_comprobante_desembolso(self, request, pk=None):
+        try:
+            prestamo = self.get_object()
+            operador = f"{request.user.first_name} {request.user.last_name}".strip() or request.user.username
+            
+            pdf_buffer = generar_pdf_desembolso_seguro(prestamo, operador_nombre=operador)
+            
+            response = HttpResponse(pdf_buffer.read(), content_type='application/pdf')
+            response['Content-Disposition'] = f'inline; filename="Comprobante_Desembolso_{prestamo.id}.pdf"'
+            return response
+        except Exception as e:
+            print(f"Error interno al generar PDF de desembolso: {e}")
+            return HttpResponse(f"Error al generar PDF: {str(e)}", status=500)
 
 
     @action(detail=False, methods=['post'])
