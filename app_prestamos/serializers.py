@@ -71,8 +71,8 @@ class PrestamoMiniSerializer(serializers.ModelSerializer):
 
 class CajaSerializer(serializers.ModelSerializer):
     fecha_formateada = serializers.SerializerMethodField()
-    cuota_id = serializers.ReadOnlyField(source='cuota.id')
-    prestamo_id = serializers.ReadOnlyField(source='prestamo.id')
+    cuota_id = serializers.SerializerMethodField()
+    prestamo_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Caja
@@ -80,11 +80,16 @@ class CajaSerializer(serializers.ModelSerializer):
         
     def get_fecha_formateada(self, obj):
         if obj.fecha:
-            # 1. Convertimos la hora UTC de la base de datos a la hora local configurada (America/Argentina/Cordoba)
             fecha_local = timezone.localtime(obj.fecha)
-            # 2. La formateamos exactamente como la tenías en la tabla
             return fecha_local.strftime('%d/%m/%Y %H:%M')
         return "---"
+
+    # Protección contra valores nulos (None)
+    def get_cuota_id(self, obj):
+        return obj.cuota.id if obj.cuota else None
+
+    def get_prestamo_id(self, obj):
+        return obj.prestamo.id if obj.prestamo else None
 
 class HistorialPagosSerializer(serializers.ModelSerializer):
     """Serializer para listar el historial cronológico de pagos del cliente"""

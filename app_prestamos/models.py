@@ -189,7 +189,8 @@ class Caja(models.Model):
     monto = models.DecimalField(max_digits=12, decimal_places=2)
     concepto = models.CharField(max_length=255)
     fecha = models.DateTimeField(auto_now_add=True)
-    cuota = models.ForeignKey('Cuota', on_delete=models.SET_NULL, null=True, blank=True)
+    prestamo = models.ForeignKey(Prestamo, on_delete=models.SET_NULL, null=True, blank=True)
+    cuota = models.ForeignKey(Cuota, on_delete=models.SET_NULL, null=True, blank=True)
     caja_diaria = models.ForeignKey(
         'CajaDiaria', 
         on_delete=models.SET_NULL, 
