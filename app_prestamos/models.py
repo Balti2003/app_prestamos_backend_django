@@ -5,7 +5,7 @@ from django.db.models import Sum
 from dateutil.relativedelta import relativedelta
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
-
+import os
 
 class Cliente(models.Model):
     nombre = models.CharField(max_length=100)
@@ -23,7 +23,26 @@ class Cliente(models.Model):
     def delete(self, *args, **kwargs ):
         self.activo = False
         self.save()
-        
+
+
+def cliente_garantia_path(instance, filename):
+    # Organiza las descargas en carpetas por DNI del cliente
+    return f'garantias/cliente_{instance.cliente.dni}/{filename}'
+
+class GarantiaCliente(models.Model):
+    cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name='garantias')
+    titulo = models.CharField(max_length=150, help_text="Ej: Recibo de sueldo, Título del auto, Fotos propiedad")
+    archivo = models.FileField(upload_to=cliente_garantia_path)
+    fecha_subida = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.titulo} - {self.cliente.nombre} {self.cliente.apellido}"
+
+    @property
+    def es_imagen(self):
+        ext = os.path.splitext(self.archivo.name)[1].lower()
+        return ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']
+    
 
 class Prestamo(models.Model):
     FRECUENCIAS = (
@@ -42,7 +61,7 @@ class Prestamo(models.Model):
     tasa_interes = models.DecimalField(max_digits=5, decimal_places=2) # Tasa periódica
     cuotas_totales = models.PositiveIntegerField()
     frecuencia = models.CharField(max_length=10, choices=FRECUENCIAS, default='mensual')
-    fecha_inicio = models.DateField(default=timezone.now)
+    fecha_inicio = models.DateField(default=timezone.now, blank=True, null=True)
     estado = models.CharField(max_length=15, choices=ESTADOS, default='activo')
     activo = models.BooleanField(default=True)
     

@@ -1,6 +1,6 @@
 from django.utils import timezone
 from rest_framework import serializers
-from .models import Cliente, Prestamo, Cuota, Caja
+from .models import Cliente, Prestamo, Cuota, Caja, GarantiaCliente
 from django.db.models import Sum
 from django.contrib.auth.password_validation import validate_password
 from .models import CajaDiaria
@@ -22,6 +22,23 @@ class ClienteSerializer(serializers.ModelSerializer):
         return PrestamoMiniSerializer(prestamos, many=True).data
 
 
+class GarantiaClienteSerializer(serializers.ModelSerializer):
+    es_imagen = serializers.ReadOnlyField()
+    archivo_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = GarantiaCliente
+        fields = ['id', 'cliente', 'titulo', 'archivo', 'archivo_url', 'es_imagen', 'fecha_subida']
+
+    def get_archivo_url(self, obj):
+        request = self.context.get('request')
+        if obj.archivo and hasattr(obj.archivo, 'url'):
+            if request:
+                return request.build_absolute_uri(obj.archivo.url)
+            return obj.archivo.url
+        return None
+    
+
 class CuotaSerializer(serializers.ModelSerializer):
     # Incluimos el cálculo de mora que definimos en el modelo
     total_con_mora = serializers.ReadOnlyField()
@@ -38,7 +55,12 @@ class PrestamoSerializer(serializers.ModelSerializer):
     # Esto permite ver las cuotas dentro del detalle del préstamo
     plan_pagos = CuotaSerializer(many=True, read_only=True)
     cliente_nombre = serializers.ReadOnlyField(source='cliente.apellido')
-    fecha_inicio = serializers.DateField(format="%Y-%m-%d", input_formats=['%Y-%m-%d', 'iso-8601'])
+    fecha_inicio = serializers.DateTimeField(
+        format="%Y-%m-%d %H:%M", 
+        input_formats=['%Y-%m-%d %H:%M', '%Y-%m-%dT%H:%M', '%Y-%m-%d', 'iso-8601'],
+        required=False, 
+        allow_null=True
+    )
 
     class Meta:
         model = Prestamo
@@ -100,6 +122,7 @@ class HistorialPagosSerializer(serializers.ModelSerializer):
         fields = ['id', 'prestamo_id', 'numero_cuota', 'monto_total', 'mora_pagada', 'fecha_pago_real']
 
 class ClientePerfilSerializer(serializers.ModelSerializer):
+    garantias = GarantiaClienteSerializer(many=True, read_only=True)
     prestamos_activos = serializers.SerializerMethodField()
     metricas_comportamiento = serializers.SerializerMethodField()
     historial_pagos = serializers.SerializerMethodField()
@@ -108,7 +131,7 @@ class ClientePerfilSerializer(serializers.ModelSerializer):
         model = Cliente
         fields = [
             'id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 
-            'prestamos_activos', 'metricas_comportamiento', 'historial_pagos'
+            'prestamos_activos', 'metricas_comportamiento', 'historial_pagos', 'garantias'
         ]
 
     def get_prestamos_activos(self, obj):

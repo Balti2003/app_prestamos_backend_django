@@ -1,11 +1,12 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import ClienteViewSet, PrestamoViewSet, CuotaViewSet, CajaViewSet, CajaDiariaViewSet
+from .views import ClienteViewSet, PrestamoViewSet, CuotaViewSet, CajaViewSet, CajaDiariaViewSet, GarantiaClienteViewSet
 from .dashboard_views import DashboardResumenView
 from .views import CambiarPasswordView
 
 router = DefaultRouter()
 router.register(r'clientes', ClienteViewSet)
+router.register(r'garantias', GarantiaClienteViewSet)
 router.register(r'prestamos', PrestamoViewSet)
 router.register(r'cuotas', CuotaViewSet)
 # 1. Movimientos o transacciones individuales (Ingresos / Egresos)

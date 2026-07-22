@@ -135,3 +135,9 @@ STATIC_URL = 'static/'
 
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
+
+# Ruta pública para acceder a los archivos desde la URL
+MEDIA_URL = '/media/'
+
+# Carpeta física donde se guardan los archivos en el servidor
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')

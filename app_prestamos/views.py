@@ -1,8 +1,8 @@
 from xml.dom import ValidationErr
-from rest_framework import viewsets, status, filters
+from rest_framework import viewsets, status, filters, parsers
 from rest_framework.response import Response
-from .models import Cliente, Prestamo, Cuota, Caja, HistorialCuota, CajaDiaria
-from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer, CajaSerializer, ClientePerfilSerializer, CajaDiariaSerializer
+from .models import Cliente, Prestamo, Cuota, Caja, HistorialCuota, CajaDiaria, GarantiaCliente
+from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer, CajaSerializer, ClientePerfilSerializer, CajaDiariaSerializer, GarantiaClienteSerializer
 from rest_framework.decorators import action
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -21,6 +21,7 @@ from rest_framework.permissions import IsAuthenticated
 from .serializers import CambiarPasswordSerializer
 from rest_framework.views import APIView
 from .utils import generar_pdf_desembolso_seguro
+
 
 class ClienteViewSet(viewsets.ModelViewSet):
     queryset = Cliente.objects.filter(activo=True)
@@ -69,6 +70,20 @@ class ClienteViewSet(viewsets.ModelViewSet):
         
         return Response(proximas_cuotas)
 
+
+class GarantiaClienteViewSet(viewsets.ModelViewSet):
+    queryset = GarantiaCliente.objects.all()
+    serializer_class = GarantiaClienteSerializer
+    parser_classes = (parsers.MultiPartParser, parsers.FormParser)
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        cliente_id = self.request.query_params.get('cliente')
+        if cliente_id:
+            queryset = queryset.filter(cliente_id=cliente_id)
+        return queryset
+    
+    
 class PrestamoViewSet(viewsets.ModelViewSet):
     queryset = Prestamo.objects.filter(activo=True)
     serializer_class = PrestamoSerializer
@@ -79,7 +94,12 @@ class PrestamoViewSet(viewsets.ModelViewSet):
     
     # Sobrescribimos el método create para disparar la lógica de cuotas
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
+        data = request.data.copy()
+        
+        if not data.get('fecha_inicio'):
+            data['fecha_inicio'] = timezone.now()
+        
+        serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
 
         # Validamos que haya plata en la caja
