@@ -1,9 +1,10 @@
+from django.contrib.auth.password_validation import validate_password
+from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
-from .models import Cliente, Prestamo, Cuota, Caja, GarantiaCliente
-from django.db.models import Sum
-from django.contrib.auth.password_validation import validate_password
-from .models import CajaDiaria
+
+from .models import Caja, CajaDiaria, Cliente, Cuota, GarantiaCliente, Prestamo
+
 
 class ClienteSerializer(serializers.ModelSerializer):
     prestamos_activos = serializers.SerializerMethodField()
@@ -11,7 +12,7 @@ class ClienteSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Cliente
-        fields = ['id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 'tiene_mora', 'prestamos_activos']
+        fields = ['id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 'tiene_mora', 'prestamos_activos']  # noqa: RUF012
     
     def get_tiene_mora(self, obj):
         from django.utils import timezone
@@ -28,7 +29,7 @@ class GarantiaClienteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = GarantiaCliente
-        fields = ['id', 'cliente', 'titulo', 'archivo', 'archivo_url', 'es_imagen', 'fecha_subida']
+        fields = ['id', 'cliente', 'titulo', 'archivo', 'archivo_url', 'es_imagen', 'fecha_subida']  # noqa: RUF012
 
     def get_archivo_url(self, obj):
         request = self.context.get('request')
@@ -70,16 +71,18 @@ class PrestamoMiniSerializer(serializers.ModelSerializer):
     """Serializer para mostrar deudas dentro del perfil del cliente"""
     cuotas_pagadas = serializers.SerializerMethodField()
     monto_cuota = serializers.SerializerMethodField()
+    plan_pagos = CuotaSerializer(source='cuotas', many=True, read_only=True)
 
     class Meta:
         model = Prestamo
-        fields = [
+        fields = [  # noqa: RUF012
             'id', 
             'monto_solicitado', 
             'cuotas_totales', 
             'cuotas_pagadas', 
             'monto_cuota', 
-            'estado'
+            'estado',
+            'plan_pagos'
         ]
 
     def get_cuotas_pagadas(self, obj):
@@ -98,7 +101,7 @@ class CajaSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Caja
-        fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada', 'cuota_id', 'prestamo_id']
+        fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada', 'cuota_id', 'prestamo_id']  # noqa: RUF012
         
     def get_fecha_formateada(self, obj):
         if obj.fecha:
@@ -119,7 +122,7 @@ class HistorialPagosSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Cuota
-        fields = ['id', 'prestamo_id', 'numero_cuota', 'monto_total', 'mora_pagada', 'fecha_pago_real']
+        fields = ['id', 'prestamo_id', 'numero_cuota', 'monto_total', 'mora_pagada', 'fecha_pago_real']  # noqa: RUF012
 
 class ClientePerfilSerializer(serializers.ModelSerializer):
     garantias = GarantiaClienteSerializer(many=True, read_only=True)
@@ -129,7 +132,7 @@ class ClientePerfilSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Cliente
-        fields = [
+        fields = [  # noqa: RUF012
             'id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 
             'prestamos_activos', 'metricas_comportamiento', 'historial_pagos', 'garantias'
         ]
