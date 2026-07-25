@@ -1,8 +1,16 @@
-from django.urls import path, include
+from django.urls import include, path
 from rest_framework.routers import DefaultRouter
-from .views import ClienteViewSet, PrestamoViewSet, CuotaViewSet, CajaViewSet, CajaDiariaViewSet, GarantiaClienteViewSet
+
 from .dashboard_views import DashboardResumenView
-from .views import CambiarPasswordView
+from .views import (
+    CajaDiariaViewSet,
+    CajaViewSet,
+    CambiarPasswordView,
+    ClienteViewSet,
+    CuotaViewSet,
+    GarantiaClienteViewSet,
+    PrestamoViewSet,
+)
 
 router = DefaultRouter()
 router.register(r'clientes', ClienteViewSet)

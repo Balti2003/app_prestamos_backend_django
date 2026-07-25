@@ -41,8 +41,9 @@ class GarantiaClienteSerializer(serializers.ModelSerializer):
     
 
 class CuotaSerializer(serializers.ModelSerializer):
-    # Incluimos el cálculo de mora que definimos en el modelo
     total_con_mora = serializers.ReadOnlyField()
+    saldo_pendiente = serializers.ReadOnlyField()
+    es_parcial = serializers.ReadOnlyField()
     mora_actual = serializers.SerializerMethodField()
 
     class Meta:
@@ -51,6 +52,7 @@ class CuotaSerializer(serializers.ModelSerializer):
     
     def get_mora_actual(self, obj):
         return obj.calcular_mora()
+
 
 class PrestamoSerializer(serializers.ModelSerializer):
     # Esto permite ver las cuotas dentro del detalle del préstamo

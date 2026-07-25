@@ -1,25 +1,42 @@
+from decimal import Decimal, InvalidOperation
+from io import BytesIO
 from xml.dom import ValidationErr
-from rest_framework import viewsets, status, filters, parsers
-from rest_framework.response import Response
-from .models import Cliente, Prestamo, Cuota, Caja, HistorialCuota, CajaDiaria, GarantiaCliente
-from .serializers import ClienteSerializer, PrestamoSerializer, CuotaSerializer, CajaSerializer, ClientePerfilSerializer, CajaDiariaSerializer, GarantiaClienteSerializer
-from rest_framework.decorators import action
+
+from django.db import transaction
+from django.db.models import Sum
+from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
-from .filters import PrestamoFilter, CuotaFilter
-from django.db import transaction
-from django.http import HttpResponse
-from io import BytesIO
-from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from django.shortcuts import get_object_or_404
-from decimal import Decimal, InvalidOperation
-from django.db.models import Sum
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from rest_framework import filters, parsers, status, viewsets
+from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
-from .serializers import CambiarPasswordSerializer
+from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from .filters import CuotaFilter, PrestamoFilter
+from .models import (
+    Caja,
+    CajaDiaria,
+    Cliente,
+    Cuota,
+    GarantiaCliente,
+    HistorialCuota,
+    Prestamo,
+)
+from .serializers import (
+    CajaDiariaSerializer,
+    CajaSerializer,
+    CambiarPasswordSerializer,
+    ClientePerfilSerializer,
+    ClienteSerializer,
+    CuotaSerializer,
+    GarantiaClienteSerializer,
+    PrestamoSerializer,
+)
 from .utils import generar_pdf_desembolso_seguro
 
 
@@ -27,49 +44,64 @@ class ClienteViewSet(viewsets.ModelViewSet):
     queryset = Cliente.objects.filter(activo=True)
     
     def get_serializer_class(self):
-        # Si están pidiendo el detalle de un cliente
         if self.action == 'retrieve':
             return ClientePerfilSerializer
-        # Para el listado general (/api/clientes/) usa el básico de siempre
         return ClienteSerializer
 
     @action(detail=True, methods=['get'])
     def cuotas_cobrables(self, request, pk=None):
         cliente = self.get_object()
-        # Filtramos préstamos activos o en mora
         prestamos = cliente.prestamos.filter(estado__in=['activo', 'mora'], activo=True)
         
         proximas_cuotas = []
         hoy = timezone.localdate()
 
         for p in prestamos:
-            cuota = p.cuotas.filter(esta_pagada=False).order_by('numero_cuota').first()
+            cuotas_pendientes = p.cuotas.filter(esta_pagada=False).order_by('numero_cuota')
             
-            if cuota:
-                monto_base = cuota.monto_total
+            for cuota in cuotas_pendientes:
+                # Lectura ultra segura de importes con fallback
+                monto_total = Decimal(str(getattr(cuota, 'monto_total', Decimal('0.00')) or '0.00'))
+                monto_pagado = Decimal(str(getattr(cuota, 'monto_pagado', Decimal('0.00')) or '0.00'))
+                
+                # Saldo de capital remanente
+                if hasattr(cuota, 'saldo_pendiente') and cuota.saldo_pendiente is not None:
+                    saldo_capital = Decimal(str(cuota.saldo_pendiente))
+                else:
+                    saldo_capital = max(Decimal('0.00'), monto_total - monto_pagado)
+                
                 mora_acumulada = Decimal('0.00')
                 dias_atraso = 0
 
-                if cuota.fecha_vencimiento < hoy:
+                if cuota.fecha_vencimiento and cuota.fecha_vencimiento < hoy:
                     dias_atraso = (hoy - cuota.fecha_vencimiento).days
-                    # Calculamos mora (ejemplo 1% diario)
-                    tasa_diaria = Decimal('0.01') 
-                    mora_acumulada = monto_base * tasa_diaria * dias_atraso
+                    
+                    if hasattr(cuota, 'calcular_mora'):
+                        mora_calc = Decimal(str(cuota.calcular_mora() or '0.00'))
+                        mora_pagada = Decimal(str(getattr(cuota, 'mora_pagada', Decimal('0.00')) or '0.00'))
+                        mora_acumulada = max(Decimal('0.00'), mora_calc - mora_pagada)
+                    else:
+                        tasa_diaria = Decimal('0.01') 
+                        mora_acumulada = monto_total * tasa_diaria * Decimal(str(dias_atraso))
+
+                monto_total_cobrable = saldo_capital + mora_acumulada
 
                 proximas_cuotas.append({
                     "cuota_id": cuota.id,
                     "prestamo_id": p.id,
                     "numero_cuota": cuota.numero_cuota,
-                    "monto_base": str(monto_base),
-                    "monto": str(monto_base + mora_acumulada),
+                    "monto_total": str(monto_total),
+                    "monto_pagado": str(monto_pagado),
+                    "saldo_pendiente": str(saldo_capital),
                     "mora": str(mora_acumulada),
+                    "monto": str(monto_total_cobrable),
                     "dias_atraso": dias_atraso,
                     "fecha_vencimiento": cuota.fecha_vencimiento,
                     "prestamo_nombre": f"Préstamo #{p.id}"
                 })
         
         return Response(proximas_cuotas)
-
+    
 
 class GarantiaClienteViewSet(viewsets.ModelViewSet):
     queryset = GarantiaCliente.objects.all()
@@ -87,12 +119,11 @@ class GarantiaClienteViewSet(viewsets.ModelViewSet):
 class PrestamoViewSet(viewsets.ModelViewSet):
     queryset = Prestamo.objects.filter(activo=True)
     serializer_class = PrestamoSerializer
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]  # noqa: RUF012
     filterset_class = PrestamoFilter
-    search_fields = ['cliente__nombre', 'cliente__apellido', 'cliente__dni']
-    ordering_fields = ['fecha_inicio', 'monto_solicitado']
+    search_fields = ['cliente__nombre', 'cliente__apellido', 'cliente__dni']  # noqa: RUF012
+    ordering_fields = ['fecha_inicio', 'monto_solicitado']  # noqa: RUF012
     
-    # Sobrescribimos el método create para disparar la lógica de cuotas
     def create(self, request, *args, **kwargs):
         data = request.data.copy()
         
@@ -102,12 +133,10 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
 
-        # Validamos que haya plata en la caja
         monto_solicitado = serializer.validated_data['monto_solicitado']
         saldo_disponible = Caja.saldo_actual()
 
         if saldo_disponible < monto_solicitado:
-            # Si no hay plata, frenamos todo y devolvemos error 400
             return Response(
                 {
                     "error": "Fondos insuficientes en caja.",
@@ -117,10 +146,7 @@ class PrestamoViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Si pasó la validación, guardamos el préstamo
         prestamo = serializer.save()
-        
-        # Generamos las cuotas
         prestamo.generar_plan_pagos()
         
         headers = self.get_success_headers(serializer.data)
@@ -137,77 +163,137 @@ class PrestamoViewSet(viewsets.ModelViewSet):
             response = HttpResponse(pdf_buffer.read(), content_type='application/pdf')
             response['Content-Disposition'] = f'inline; filename="Comprobante_Desembolso_{prestamo.id}.pdf"'
             return response
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"Error interno al generar PDF de desembolso: {e}")
-            return HttpResponse(f"Error al generar PDF: {str(e)}", status=500)
+            return HttpResponse(f"Error al generar PDF: {e!s}", status=500)
 
+    @action(detail=True, methods=['post'], url_path='registrar-pago')
+    def registrar_pago(self, request, pk=None):
+        """
+        Procesa el ingreso de dinero para un préstamo aplicando cobro en cascada:
+        1. Mora de la cuota vencida más antigua.
+        2. Saldo de capital/interés pendiente de esa cuota.
+        3. El sobrante continúa hacia las siguientes cuotas (pagos parciales / adelantados).
+        4. Asienta el ingreso del dinero real percibido en la caja.
+        """
+        prestamo = self.get_object()
+        monto_raw = request.data.get('monto')
 
-    @action(detail=False, methods=['post'])
-    def registrar_pago_exacto(self, request):
-        cuota_id = request.data.get('cuota_id')
-        monto_raw = request.data.get('monto') # Capturamos el dato crudo
-        
-        if not cuota_id:
-            return Response({"error": "Debe proporcionar el ID de la cuota."}, status=400)
-        
-        # --- VALIDACIÓN DE MONTO (Parte 1 robustecida) ---
         if monto_raw is None or monto_raw == "":
-            return Response({"error": "El monto del pago es obligatorio y no fue recibido."}, status=400)
+            return Response({"error": "Debe proporcionar el monto del pago."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Limpiamos el valor por si el frontend envía el signo $ o comas de miles
             monto_limpio = str(monto_raw).replace('$', '').replace(',', '').strip()
-            monto_enviado = Decimal(monto_limpio)
+            monto_disponible = Decimal(monto_limpio)
+            if monto_disponible <= 0:
+                raise ValueError()
         except (InvalidOperation, ValueError, TypeError):
-            return Response({"error": f"Formato de monto inválido recibido: {monto_raw}"}, status=400)
-        # -------------------------------------------------
+            return Response({"error": f"Formato de monto inválido: {monto_raw}"}, status=status.HTTP_400_BAD_REQUEST)
 
-        cuota = get_object_or_404(Cuota, id=cuota_id, esta_pagada=False)
-        prestamo = cuota.prestamo
-        monto_base = cuota.monto_total
+        with transaction.atomic():
+            cuotas_pendientes = prestamo.cuotas.filter(esta_pagada=False).order_by('numero_cuota')
 
-        # Calculamos la mora en base al monto verificado
-        mora_calculada = monto_enviado - monto_base
+            if not cuotas_pendientes.exists():
+                return Response({"error": "Este préstamo no tiene cuotas pendientes de pago."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 1. Procesamos el pago guardando la mora de forma fija
-        cuota.esta_pagada = True
-        cuota.fecha_pago_real = timezone.localdate() # Simplificado para fecha local
-        cuota.mora_pagada = max(Decimal('0.00'), mora_calculada) 
-        cuota.save()
+            monto_inicial = monto_disponible
+            desglose = []
 
-        # 2. Forzamos al préstamo a revisar su estado
-        if hasattr(prestamo, 'actualizar_estado_mora'):
-            prestamo.actualizar_estado_mora() 
+            for cuota in cuotas_pendientes:
+                if monto_disponible <= 0:
+                    break
 
-        return Response({
-            "success": True,
-            "message": "Pago asentado correctamente.",
-            "cuota_id": cuota.id,
-            "monto_total": str(monto_enviado),
-            "mora_asentada": str(cuota.mora_pagada)
-        }, status=200)
-        
-        
-    @action(detail=False, methods=['post'])
-    def sincronizar_mora(self, request):
-        prestamos_activos = Prestamo.objects.filter(estado__in=['activo', 'mora'])
-        actualizados = 0
-            
-        for p in prestamos_activos:
-            if p.actualizar_estado_mora():
-                actualizados += 1
-                    
-        return Response({
-            "message": f"Sincronización completada. {actualizados} préstamos cambiaron de estado."
-        })
+                mora_cuota = cuota.calcular_mora()
+                mora_abonada = Decimal('0.00')
+                capital_abonado = Decimal('0.00')
+
+                # A. Cobrar mora si existe
+                if mora_cuota > 0:
+                    mora_abonada = min(monto_disponible, mora_cuota)
+                    cuota.mora_pagada += mora_abonada
+                    monto_disponible -= mora_abonada
+
+                # B. Cobrar capital/cuota si aún queda dinero disponible
+                if monto_disponible > 0:
+                    falta = cuota.saldo_pendiente
+                    capital_abonado = min(monto_disponible, falta)
+                    cuota.monto_pagado += capital_abonado
+                    monto_disponible -= capital_abonado
+
+                    if cuota.saldo_pendiente == Decimal('0.00'):
+                        cuota.esta_pagada = True
+                        cuota.fecha_pago_real = timezone.localdate()
+
+                cuota.save()
+
+                desglose.append({
+                    "cuota_id": cuota.id,
+                    "numero_cuota": cuota.numero_cuota,
+                    "mora_abonada": float(mora_abonada),
+                    "capital_abonado": float(capital_abonado),
+                    "cuota_saldada": cuota.esta_pagada,
+                    "saldo_pendiente_cuota": float(cuota.saldo_pendiente)
+                })
+
+            # Calcular cuánto dinero real se aplicó del total entregado por el cliente
+            monto_aplicado = monto_inicial - monto_disponible
+
+            if monto_aplicado > 0:
+                cliente = prestamo.cliente
+                nombre_cliente = f"{cliente.apellido.upper()} {cliente.nombre.upper()}" if cliente else "CLIENTE"
+                concepto = f"COBRO PAGO PREST #{prestamo.id} - CLIENTE: {nombre_cliente}"
+
+                # Tomamos el ID de la primera cuota impactada en la cascada
+                cuota_impactada_id = desglose[0]["cuota_id"] if desglose else None
+
+                Caja.objects.create(
+                    tipo='ingreso',
+                    monto=monto_aplicado,
+                    concepto=concepto,
+                    prestamo=prestamo,
+                    cuota_id=cuota_impactada_id
+                )
+
+            # Actualizar estado de mora y vigencia del préstamo
+            if hasattr(prestamo, 'actualizar_estado_mora'):
+                prestamo.actualizar_estado_mora()
+
+            # Verificar si se cancelaron todas las cuotas del contrato
+            todas_pagadas = not prestamo.cuotas.filter(esta_pagada=False).exists()
+            if todas_pagadas:
+                prestamo.estado = 'finalizado'
+                prestamo.save()
+
+            return Response({
+                "success": True,
+                "message": "Pago procesado y registrado en caja correctamente.",
+                "monto_ingresado": float(monto_inicial),
+                "monto_aplicado": float(monto_aplicado),
+                "monto_sobrante": float(monto_disponible),
+                "prestamo_finalizado": todas_pagadas,
+                "desglose": desglose
+            }, status=status.HTTP_200_OK)
+
+        @action(detail=False, methods=['post'])
+        def sincronizar_mora(self, request):
+            prestamos_activos = Prestamo.objects.filter(estado__in=['activo', 'mora'])
+            actualizados = 0
+                
+            for p in prestamos_activos:
+                if hasattr(p, 'actualizar_estado_mora') and p.actualizar_estado_mora():
+                    actualizados += 1
+                        
+            return Response({
+                "message": f"Sincronización completada. {actualizados} préstamos cambiaron de estado."
+            })
 
 
 class CuotaViewSet(viewsets.ModelViewSet):
     queryset = Cuota.objects.all()
     serializer_class = CuotaSerializer
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]  # noqa: RUF012
     filterset_class = CuotaFilter
-    ordering_fields = ['fecha_vencimiento', 'numero_cuota']
+    ordering_fields = ['fecha_vencimiento', 'numero_cuota']  # noqa: RUF012
     
     @action(detail=True, methods=['post'])
     def registrar_pago(self, request, pk=None):
@@ -265,15 +351,23 @@ class CuotaViewSet(viewsets.ModelViewSet):
                 )
 
             return Response({'status': 'Pago registrado con éxito'}, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         
     @action(detail=True, methods=['get'])
     def generar_recibo(self, request, pk=None):
         cuota = self.get_object()
-        if not cuota.esta_pagada:
-            return Response({'error': 'No se puede generar recibo de una cuota no pagada'}, status=400)
+        
+        # 1. Validamos que la cuota tenga al menos UN abono registrado (monto_pagado > 0 o mora_pagada > 0)
+        monto_pagado = getattr(cuota, 'monto_pagado', Decimal('0.00'))
+        mora_pagada = getattr(cuota, 'mora_pagada', Decimal('0.00'))
+        
+        if monto_pagado <= 0 and mora_pagada <= 0 and not cuota.esta_pagada:
+            return Response(
+                {'error': 'No se puede generar recibo de una cuota que no registra ningún pago.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         buffer = BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50)
@@ -289,50 +383,72 @@ class CuotaViewSet(viewsets.ModelViewSet):
         elements.append(Spacer(1, 20))
 
         # --- DATOS DEL CLIENTE Y PRÉSTAMO ---
+        estado_cuota = "COMPLETADA / SALDADA" if cuota.esta_pagada else "PAGO PARCIAL"
+        
         data_cliente = [
             [Paragraph(f"<b>Cliente:</b> {cuota.prestamo.cliente.nombre} {cuota.prestamo.cliente.apellido}", styles['Normal']), 
              Paragraph(f"<b>DNI/CUIL:</b> {getattr(cuota.prestamo.cliente, 'dni', '---')}", styles['Normal'])],
             [Paragraph(f"<b>Préstamo ID:</b> #{cuota.prestamo.id}", styles['Normal']), 
-             Paragraph(f"<b>Cuota N°:</b> {cuota.numero_cuota}", styles['Normal'])]
+             Paragraph(f"<b>Cuota N°:</b> {cuota.numero_cuota} <i>({estado_cuota})</i>", styles['Normal'])]
         ]
         t_cliente = Table(data_cliente, colWidths=[250, 200])
         elements.append(t_cliente)
         elements.append(Spacer(1, 20))
 
-        # --- DETALLE DEL PAGO CORREGIDO ---
-        mora = cuota.mora_pagada
-        total = cuota.monto_total + mora
-        
+        # --- CÁLCULOS DEL DETALLE DE PAGO ---
+        monto_total_cuota = getattr(cuota, 'monto_total', Decimal('0.00'))
+        saldo_pendiente = getattr(cuota, 'saldo_pendiente', max(Decimal('0.00'), monto_total_cuota - monto_pagado))
+        total_abonado = monto_pagado + mora_pagada
+
+        # --- TABLA DE DETALLE DEL PAGO ---
         data_pago = [
             ['Descripción', 'Monto'],
-            ['Monto de la Cuota', f"${cuota.monto_total:,.2f}"],
-            ['Intereses por Mora', f"${mora:,.2f}"],
-            [Paragraph('<b>TOTAL PAGADO</b>', styles['Normal']), f'${total:,.2f}']
+            ['Monto Total de la Cuota', f"${monto_total_cuota:,.2f}"],
+            ['Abono Realizado a Capital', f"${monto_pagado:,.2f}"],
+            ['Intereses por Mora Abonados', f"${mora_pagada:,.2f}"],
+            [Paragraph('<b>TOTAL ABONADO</b>', styles['Normal']), f'${total_abonado:,.2f}']
         ]
 
+        # Si la cuota aún no está totalmente saldada, agregamos la fila con lo que resta
+        if not cuota.esta_pagada and saldo_pendiente > 0:
+            data_pago.append(['Saldo Restante Pendiente', f"${saldo_pendiente:,.2f}"])
+
         t_pago = Table(data_pago, colWidths=[350, 100])
-        t_pago.setStyle(TableStyle([
+        
+        # Estilos dinámicos para la tabla según si tiene saldo restante o no
+        cant_filas = len(data_pago)
+        t_pago_style = [
             ('BACKGROUND', (0, 0), (1, 0), colors.grey),
             ('TEXTCOLOR', (0, 0), (1, 0), colors.whitesmoke),
             ('ALIGN', (0, 0), (1, 0), 'CENTER'),
             ('FONTNAME', (0, 0), (1, 0), 'Helvetica-Bold'),
             ('BOTTOMPADDING', (0, 0), (1, 0), 12),
-            ('BACKGROUND', (0, 3), (1, 3), colors.lightgrey),
-            ('GRID', (0, 0), (1, 3), 1, colors.black),
-            ('ALIGN', (1, 1), (1, 3), 'RIGHT'),
-        ]))
+            ('BACKGROUND', (0, 4), (1, 4), colors.lightgrey), # Fila del TOTAL ABONADO
+            ('GRID', (0, 0), (1, cant_filas - 1), 1, colors.black),
+            ('ALIGN', (1, 1), (1, cant_filas - 1), 'RIGHT'),
+        ]
+
+        if not cuota.esta_pagada and saldo_pendiente > 0:
+            # Resaltamos en amarillo/alerta suave el saldo restante
+            t_pago_style.append(('BACKGROUND', (0, 5), (1, 5), colors.HexColor("#FFF9C4")))
+
+        t_pago.setStyle(TableStyle(t_pago_style))
         elements.append(t_pago)
         elements.append(Spacer(1, 40))
 
         # --- FIRMA Y PIE ---
-        elements.append(Paragraph(f"Cobrado por: {request.user.get_full_name() or request.user.username}", styles['Normal']))
+        cobrador = request.user.get_full_name() or request.user.username if request.user and request.user.is_authenticated else "Sistema"
+        elements.append(Paragraph(f"Cobrado por: {cobrador}", styles['Normal']))
         elements.append(Spacer(1, 30))
         elements.append(Paragraph("__________________________", styles['Normal']))
         elements.append(Paragraph("Firma y Sello del Receptor", styles['Normal']))
         
         elements.append(Spacer(1, 50))
         nota_style = ParagraphStyle('NotaStyle', parent=styles['Normal'], fontSize=8, textColor=colors.grey)
-        elements.append(Paragraph("Este documento sirve como comprobante legal de pago para el período mencionado. Conserve este recibo para cualquier reclamo futuro.", nota_style))
+        elements.append(Paragraph(
+            "Este documento sirve como comprobante legal de pago/abono efectuado para el período mencionado. Conserve este recibo para cualquier reclamo futuro.", 
+            nota_style
+        ))
 
         doc.build(elements)
         buffer.seek(0)
@@ -340,9 +456,11 @@ class CuotaViewSet(viewsets.ModelViewSet):
         filename = f"Recibo_P#{cuota.prestamo.id}_C#{cuota.numero_cuota}.pdf"
         return HttpResponse(buffer, content_type='application/pdf', headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
+
 class CajaViewSet(viewsets.ModelViewSet):
     queryset = Caja.objects.all().order_by('-fecha') # Los últimos movimientos primero
     serializer_class = CajaSerializer
+
 
 class DashboardViewSet(viewsets.ViewSet):
     """
@@ -378,7 +496,7 @@ class DashboardViewSet(viewsets.ViewSet):
         })
 
 class CambiarPasswordView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated]  # noqa: RUF012
 
     def post(self, request, *args, **kwargs):
         serializer = CambiarPasswordSerializer(data=request.data, context={'request': request})
@@ -394,13 +512,13 @@ class CambiarPasswordView(APIView):
             )
             
         # Retornamos el primer error que encontremos para simplificar el mensaje en el frontend
-        error_msg = list(serializer.errors.values())[0][0]
+        error_msg = next(iter(serializer.errors.values()))[0]
         return Response({"error": error_msg}, status=status.HTTP_400_BAD_REQUEST)
 
 class CajaDiariaViewSet(viewsets.ModelViewSet):
     queryset = CajaDiaria.objects.all()
     serializer_class = CajaDiariaSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated]  # noqa: RUF012
 
     # Endpoint para consultar el estado de la caja actual
     @action(detail=False, methods=['get'])
@@ -487,5 +605,5 @@ class CajaDiariaViewSet(viewsets.ModelViewSet):
 
                 serializer = self.get_serializer(caja)
                 return Response(serializer.data, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

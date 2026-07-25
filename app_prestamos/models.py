@@ -75,7 +75,7 @@ class Prestamo(models.Model):
         """
         Calcula y crea las cuotas usando Interés Directo con frecuencia dinámica.
         """
-        interes_total_monetario = self.monto_solicitado * (self.tasa_interes / Decimal('100'))
+        interes_total_monetario = self.monto_solicitado * (self.tasa_interes / Decimal(100))
         monto_total_a_pagar = self.monto_solicitado + interes_total_monetario
         
         monto_cuota = monto_total_a_pagar / self.cuotas_totales
@@ -169,6 +169,7 @@ class Cuota(models.Model):
     monto_capital = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     monto_interes = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     monto_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    monto_pagado = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     fecha_vencimiento = models.DateField()
     fecha_pago_real = models.DateField(null=True, blank=True)
     esta_pagada = models.BooleanField(default=False)
@@ -176,17 +177,42 @@ class Cuota(models.Model):
 
     def __str__(self):
         return f"Cuota {self.numero_cuota} de {self.prestamo}"
-    
+
+    @property
+    def saldo_pendiente(self):
+        """Devuelve cuánto le falta pagar de capital/interés a esta cuota."""
+        if self.esta_pagada:
+            return Decimal('0.00')
+        saldo = self.monto_total - self.monto_pagado
+        return max(Decimal('0.00'), saldo)
+
+    @property
+    def es_parcial(self):
+        """Indica si la cuota tiene pagos registrados pero no está 100% saldada."""
+        return self.monto_pagado > 0 and not self.esta_pagada
+
     def calcular_mora(self, tasa_mora_diaria=Decimal('0.5')): # Ejemplo 0.5% diario
+        """
+        Calcula la mora pendiente acumulada sobre el SALDO PENDIENTE
+        (descontando cualquier mora ya pagada previamente).
+        """
         if not self.esta_pagada and timezone.now().date() > self.fecha_vencimiento:
             dias_atraso = (timezone.now().date() - self.fecha_vencimiento).days
-            monto_mora = self.monto_total * (tasa_mora_diaria / Decimal('100')) * dias_atraso
-            return monto_mora.quantize(Decimal('0.01'))
+            
+            # La mora se genera sobre lo que FALTA pagar (saldo_pendiente)
+            mora_generada = self.saldo_pendiente * (tasa_mora_diaria / Decimal(100)) * dias_atraso
+            mora_generada = mora_generada.quantize(Decimal('0.01'))
+            
+            # Restamos la mora que ya haya abonado en entregas anteriores
+            mora_restante = mora_generada - self.mora_pagada
+            return max(Decimal('0.00'), mora_restante)
+            
         return Decimal('0.00')
 
     @property
     def total_con_mora(self):
-        return self.monto_total + self.calcular_mora()
+        """Monto total requerido para cancelar completamente esta cuota hoy."""
+        return self.saldo_pendiente + self.calcular_mora()
 
 
 class HistorialCuota(models.Model):
@@ -255,7 +281,7 @@ class HistorialEstado(models.Model):
 
 
 class CajaDiaria(models.Model):
-    ESTADO_CHOICES = [
+    ESTADO_CHOICES = [  # noqa: RUF012
         ('ABIERTA', 'Abierta'),
         ('CERRADA', 'Cerrada'),
     ]
@@ -279,7 +305,7 @@ class CajaDiaria(models.Model):
     observaciones = models.TextField(blank=True, null=True, help_text="Comentarios en caso de que haya diferencias")
 
     class Meta:
-        ordering = ['-fecha']
+        ordering = ['-fecha']  # noqa: RUF012
         verbose_name = "Caja Diaria"
         verbose_name_plural = "Cajas Diarias"
 
