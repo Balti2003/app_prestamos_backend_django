@@ -1,8 +1,10 @@
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from django.db.models import Sum
+from django.db.models import Avg, Sum
 from django.utils import timezone
-from .models import Prestamo, Cuota, Cliente, Caja
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from .models import Caja, Cliente, Cuota, Prestamo
+
 
 class DashboardResumenView(APIView):
     def get(self, request):
@@ -16,7 +18,6 @@ class DashboardResumenView(APIView):
                 p.save()
                 
         # 1. Métricas de Capital
-        # Optimizamos usando un solo query para capital e intereses
         pendientes = Cuota.objects.filter(esta_pagada=False).aggregate(
             cap=Sum('monto_capital'),
             int=Sum('monto_interes')
@@ -24,10 +25,17 @@ class DashboardResumenView(APIView):
         capital_en_la_calle = pendientes['cap'] or 0
         intereses_por_cobrar = pendientes['int'] or 0
         
-        # 2. Estado de la Cartera
-        prestamos_activos = Prestamo.objects.filter(activo=True, estado='activo').count()
-        prestamos_en_mora = Prestamo.objects.filter(activo=True, estado='mora').count()
+        # 1. Préstamos vigentes
+        prestamos_vigentes_qs = Prestamo.objects.filter(activo=True, estado__in=['activo', 'mora'])
+        prestamos_vigentes_totales = prestamos_vigentes_qs.count()
         
+        prestamos_en_mora = prestamos_vigentes_qs.filter(estado='mora').count()
+        
+        # 2. Promedio calculado SOLO sobre préstamos vigentes
+        promedio_otorgado = prestamos_vigentes_qs.aggregate(
+            prom=Avg('monto_solicitado')
+        )['prom'] or 0
+
         # 3. Cobranza del Día
         cobranza_hoy_esperada = Cuota.objects.filter(
             fecha_vencimiento=hoy, 
@@ -37,10 +45,9 @@ class DashboardResumenView(APIView):
         # 4. Caja y Rentabilidad REAL
         saldo_caja = Caja.saldo_actual()
 
-        # RENTABILIDAD OPTIMIZADA (Sumamos directamente los campos de la BD)
         datos_pagados = Cuota.objects.filter(esta_pagada=True).aggregate(
             int_cobrado=Sum('monto_interes'),
-            mora_cobrada=Sum('mora_pagada') # <--- Usamos el campo que creamos, no el método
+            mora_cobrada=Sum('mora_pagada')
         )
         
         total_ganancia_real = (datos_pagados['int_cobrado'] or 0) + (datos_pagados['mora_cobrada'] or 0)
@@ -58,7 +65,8 @@ class DashboardResumenView(APIView):
                 "rentabilidad_acumulada": float(total_ganancia_real)
             },
             "estado_cartera": {
-                "prestamos_activos": prestamos_activos,
+                "prestamos_activos": prestamos_vigentes_totales,
+                "promedio_prestamo": round(float(promedio_otorgado), 2),
                 "prestamos_en_mora": prestamos_en_mora,
                 "tasa_mora_porcentaje": round(tasa_mora, 2)
             },

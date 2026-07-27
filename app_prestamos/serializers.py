@@ -15,12 +15,17 @@ class ClienteSerializer(serializers.ModelSerializer):
         fields = ['id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 'tiene_mora', 'prestamos_activos']  # noqa: RUF012
     
     def get_tiene_mora(self, obj):
-        from django.utils import timezone
         return obj.prestamos.filter(cuotas__esta_pagada=False, cuotas__fecha_vencimiento__lt=timezone.localdate()).exists()
 
     def get_prestamos_activos(self, obj):
         prestamos = obj.prestamos.filter(estado__in=['activo', 'mora'], activo=True)
         return PrestamoMiniSerializer(prestamos, many=True).data
+
+
+class ClienteResumenSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Cliente
+        fields = ['id', 'nombre', 'apellido', 'dni']  # noqa: RUF012
 
 
 class GarantiaClienteSerializer(serializers.ModelSerializer):
@@ -55,12 +60,17 @@ class CuotaSerializer(serializers.ModelSerializer):
 
 
 class PrestamoSerializer(serializers.ModelSerializer):
-    # Esto permite ver las cuotas dentro del detalle del préstamo
-    plan_pagos = CuotaSerializer(many=True, read_only=True)
+    # Usamos try/except o fallback en caso de que related_name difiera
+    plan_pagos = serializers.SerializerMethodField()
     cliente_nombre = serializers.ReadOnlyField(source='cliente.apellido')
-    fecha_inicio = serializers.DateTimeField(
-        format="%Y-%m-%d %H:%M", 
-        input_formats=['%Y-%m-%d %H:%M', '%Y-%m-%dT%H:%M', '%Y-%m-%d', 'iso-8601'],
+    cliente_detail = ClienteResumenSerializer(source='cliente', read_only=True)
+    cuotas_pagadas_count = serializers.SerializerMethodField()
+    cantidad_cuotas = serializers.ReadOnlyField(source='cuotas_totales')
+    monto_cuota = serializers.SerializerMethodField()
+    
+    fecha_inicio = serializers.DateField(
+        format="%Y-%m-%d", 
+        input_formats=['%Y-%m-%d', 'iso-8601'],
         required=False, 
         allow_null=True
     )
@@ -68,6 +78,25 @@ class PrestamoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Prestamo
         fields = '__all__'
+
+    def get_monto_cuota(self, obj):
+        # Toma el monto de la primera cuota registrada en el plan
+        cuota = self._get_cuotas_qs(obj).first()
+        return float(cuota.monto_total) if cuota else 0.0
+    
+    def _get_cuotas_qs(self, obj):
+        if hasattr(obj, 'cuotas'):
+            return obj.cuotas.all()
+        return obj.cuota_set.all()
+
+    def get_plan_pagos(self, obj):
+        cuotas = self._get_cuotas_qs(obj)
+        return CuotaSerializer(cuotas, many=True).data
+
+    def get_cuotas_pagadas_count(self, obj):
+        cuotas = self._get_cuotas_qs(obj)
+        return cuotas.filter(esta_pagada=True).count()
+
 
 class PrestamoMiniSerializer(serializers.ModelSerializer):
     """Serializer para mostrar deudas dentro del perfil del cliente"""
@@ -88,13 +117,12 @@ class PrestamoMiniSerializer(serializers.ModelSerializer):
         ]
 
     def get_cuotas_pagadas(self, obj):
-        # Contamos cuántas cuotas tienen esta_pagada=True
         return obj.cuotas.filter(esta_pagada=True).count()
 
     def get_monto_cuota(self, obj):
-        # Tomamos el monto_total de la primera cuota del plan
         cuota = obj.cuotas.first()
         return cuota.monto_total if cuota else 0
+
 
 class CajaSerializer(serializers.ModelSerializer):
     fecha_formateada = serializers.SerializerMethodField()
@@ -111,12 +139,12 @@ class CajaSerializer(serializers.ModelSerializer):
             return fecha_local.strftime('%d/%m/%Y %H:%M')
         return "---"
 
-    # Protección contra valores nulos (None)
     def get_cuota_id(self, obj):
         return obj.cuota.id if obj.cuota else None
 
     def get_prestamo_id(self, obj):
         return obj.prestamo.id if obj.prestamo else None
+
 
 class HistorialPagosSerializer(serializers.ModelSerializer):
     """Serializer para listar el historial cronológico de pagos del cliente"""
@@ -125,6 +153,7 @@ class HistorialPagosSerializer(serializers.ModelSerializer):
     class Meta:
         model = Cuota
         fields = ['id', 'prestamo_id', 'numero_cuota', 'monto_total', 'mora_pagada', 'fecha_pago_real']  # noqa: RUF012
+
 
 class ClientePerfilSerializer(serializers.ModelSerializer):
     garantias = GarantiaClienteSerializer(many=True, read_only=True)
@@ -140,27 +169,22 @@ class ClientePerfilSerializer(serializers.ModelSerializer):
         ]
 
     def get_prestamos_activos(self, obj):
-        # Usamos el PrestamoMiniSerializer
         prestamos = obj.prestamos.filter(estado__in=['activo', 'mora'], activo=True)
         return PrestamoMiniSerializer(prestamos, many=True).data
 
     def get_metricas_comportamiento(self, obj):
-        # Todas las cuotas pagadas históricas de este cliente
         cuotas_pagadas = Cuota.objects.filter(prestamo__cliente=obj, esta_pagada=True)
         
         total_pagadas = cuotas_pagadas.count()
-        # Una cuota se pagó con mora si el campo mora_pagada es mayor a cero
         pagadas_con_mora = cuotas_pagadas.filter(mora_pagada__gt=0).count()
         pagadas_a_tiempo = total_pagadas - pagadas_con_mora
 
-        # Calcular ganancias generadas por este cliente específico
         ganancias = cuotas_pagadas.aggregate(
             intereses=Sum('monto_interes'),
             mora=Sum('mora_pagada')
         )
         total_ganancia = (ganancias['intereses'] or 0) + (ganancias['mora'] or 0)
 
-        # Calcular porcentaje de puntualidad
         tasa_puntualidad = (pagadas_a_tiempo / total_pagadas * 100) if total_pagadas > 0 else 100
 
         return {
@@ -173,13 +197,13 @@ class ClientePerfilSerializer(serializers.ModelSerializer):
         }
 
     def get_historial_pagos(self, obj):
-        # Traemos todos los pagos ordenados desde el más reciente al más viejo
         cuotas = Cuota.objects.filter(
             prestamo__cliente=obj, 
             esta_pagada=True
         ).order_by('-fecha_pago_real')
         return HistorialPagosSerializer(cuotas, many=True).data
     
+
 class CambiarPasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(required=True, write_only=True)
     new_password = serializers.CharField(required=True, write_only=True)
@@ -191,9 +215,9 @@ class CambiarPasswordSerializer(serializers.Serializer):
         return value
 
     def validate_new_password(self, value):
-        # Valida que cumpla las políticas de seguridad de Django (longitud, caracteres, etc.)
         validate_password(value, user=self.context['request'].user)
         return value
+
 
 class CajaDiariaSerializer(serializers.ModelSerializer):
     operador_apertura_nombre = serializers.ReadOnlyField(source='operador_apertura.username')
