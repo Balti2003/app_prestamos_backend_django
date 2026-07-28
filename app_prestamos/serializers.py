@@ -1,3 +1,4 @@
+from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.db.models import Sum
 from django.utils import timezone
@@ -60,7 +61,6 @@ class CuotaSerializer(serializers.ModelSerializer):
 
 
 class PrestamoSerializer(serializers.ModelSerializer):
-    # Usamos try/except o fallback en caso de que related_name difiera
     plan_pagos = serializers.SerializerMethodField()
     cliente_nombre = serializers.ReadOnlyField(source='cliente.apellido')
     cliente_detail = ClienteResumenSerializer(source='cliente', read_only=True)
@@ -80,7 +80,6 @@ class PrestamoSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
     def get_monto_cuota(self, obj):
-        # Toma el monto de la primera cuota registrada en el plan
         cuota = self._get_cuotas_qs(obj).first()
         return float(cuota.monto_total) if cuota else 0.0
     
@@ -226,3 +225,12 @@ class CajaDiariaSerializer(serializers.ModelSerializer):
     class Meta:
         model = CajaDiaria
         fields = '__all__'
+
+
+class UserSerializer(serializers.ModelSerializer):
+    """Serializer para devolver el usuario autenticado y su rol al frontend"""
+    es_admin = serializers.BooleanField(source='is_staff')
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'es_admin']  # noqa: RUF012

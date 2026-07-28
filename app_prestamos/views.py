@@ -12,7 +12,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from rest_framework import filters, parsers, status, viewsets
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -36,9 +36,17 @@ from .serializers import (
     CuotaSerializer,
     GarantiaClienteSerializer,
     PrestamoSerializer,
+    UserSerializer,
 )
 from .utils import generar_pdf_desembolso_seguro
 
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def usuario_actual(request):
+    """Devuelve los datos del usuario logueado con su rol"""
+    serializer = UserSerializer(request.user)
+    return Response(serializer.data)
 
 class ClienteViewSet(viewsets.ModelViewSet):
     queryset = Cliente.objects.filter(activo=True)

@@ -10,6 +10,7 @@ from .views import (
     CuotaViewSet,
     GarantiaClienteViewSet,
     PrestamoViewSet,
+    usuario_actual,
 )
 
 router = DefaultRouter()
@@ -24,6 +25,7 @@ router.register(r'caja-diaria', CajaDiariaViewSet, basename='caja-diaria')
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('me/', usuario_actual, name='usuario_actual'),
     path('dashboard/resumen/', DashboardResumenView.as_view(), name='dashboard-resumen'),
     path('usuario/cambiar-password/', CambiarPasswordView.as_view(), name='cambiar-password'),
 ]
