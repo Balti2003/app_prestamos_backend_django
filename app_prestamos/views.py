@@ -48,6 +48,19 @@ class ClienteViewSet(viewsets.ModelViewSet):
             return ClientePerfilSerializer
         return ClienteSerializer
 
+    def destroy(self, request, *args, **kwargs):
+        cliente = self.get_object()
+        
+        # Validación de seguridad: No eliminar si tiene préstamos activos
+        prestamos_activos = cliente.prestamos.filter(estado__in=['activo', 'mora'])
+        if prestamos_activos.exists():
+            return Response(
+                {"error": "No se puede eliminar el cliente porque tiene préstamos activos o en mora."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        return super().destroy(request, *args, **kwargs)
+    
     @action(detail=True, methods=['get'])
     def cuotas_cobrables(self, request, pk=None):
         cliente = self.get_object()
@@ -123,6 +136,13 @@ class PrestamoViewSet(viewsets.ModelViewSet):
     filterset_class = PrestamoFilter
     search_fields = ['cliente__nombre', 'cliente__apellido', 'cliente__dni']  # noqa: RUF012
     ordering_fields = ['fecha_inicio', 'monto_solicitado']  # noqa: RUF012
+    
+    def destroy(self, request, *args, **kwargs):
+        prestamo = self.get_object()
+        
+        Caja.objects.filter(prestamo=prestamo).delete()
+
+        return super().destroy(request, *args, **kwargs)
     
     def create(self, request, *args, **kwargs):
         data = request.data.copy()
