@@ -178,7 +178,8 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         """
         prestamo = self.get_object()
         monto_raw = request.data.get('monto')
-
+        metodo_pago = request.data.get('metodo_pago', 'efectivo')
+        
         if monto_raw is None or monto_raw == "":
             return Response({"error": "Debe proporcionar el monto del pago."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -224,6 +225,7 @@ class PrestamoViewSet(viewsets.ModelViewSet):
                         cuota.esta_pagada = True
                         cuota.fecha_pago_real = timezone.localdate()
 
+                cuota.metodo_pago = metodo_pago
                 cuota.save()
 
                 desglose.append({
@@ -250,6 +252,7 @@ class PrestamoViewSet(viewsets.ModelViewSet):
                     tipo='ingreso',
                     monto=monto_aplicado,
                     concepto=concepto,
+                    metodo_pago=metodo_pago,
                     prestamo=prestamo,
                     cuota_id=cuota_impactada_id
                 )
@@ -400,13 +403,17 @@ class CuotaViewSet(viewsets.ModelViewSet):
         saldo_pendiente = getattr(cuota, 'saldo_pendiente', max(Decimal('0.00'), monto_total_cuota - monto_pagado))
         total_abonado = monto_pagado + mora_pagada
 
+        # ⚡ Determinamos la forma de pago legible
+        metodo_pago_str = cuota.get_metodo_pago_display().upper() if hasattr(cuota, 'get_metodo_pago_display') else str(getattr(cuota, 'metodo_pago', 'efectivo')).upper()
+
         # --- TABLA DE DETALLE DEL PAGO ---
         data_pago = [
-            ['Descripción', 'Monto'],
+            ['Descripción', 'Monto / Detalle'],
             ['Monto Total de la Cuota', f"${monto_total_cuota:,.2f}"],
             ['Abono Realizado a Capital', f"${monto_pagado:,.2f}"],
             ['Intereses por Mora Abonados', f"${mora_pagada:,.2f}"],
-            [Paragraph('<b>TOTAL ABONADO</b>', styles['Normal']), f'${total_abonado:,.2f}']
+            [Paragraph('<b>TOTAL ABONADO</b>', styles['Normal']), f'${total_abonado:,.2f}'],
+            ['Forma de Pago', metodo_pago_str]
         ]
 
         # Si la cuota aún no está totalmente saldada, agregamos la fila con lo que resta
@@ -429,8 +436,8 @@ class CuotaViewSet(viewsets.ModelViewSet):
         ]
 
         if not cuota.esta_pagada and saldo_pendiente > 0:
-            # Resaltamos en amarillo/alerta suave el saldo restante
-            t_pago_style.append(('BACKGROUND', (0, 5), (1, 5), colors.HexColor("#FFF9C4")))
+            # Resaltamos en amarillo/alerta suave el saldo restante (ahora en el índice 6 por la fila agregada)
+            t_pago_style.append(('BACKGROUND', (0, 6), (1, 6), colors.HexColor("#FFF9C4")))
 
         t_pago.setStyle(TableStyle(t_pago_style))
         elements.append(t_pago)

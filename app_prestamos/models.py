@@ -162,6 +162,11 @@ class Prestamo(models.Model):
     def __str__(self):
         return f"Préstamo #{self.id} - {self.cliente.apellido}"
 
+METODOS_PAGO = [
+    ('efectivo', 'Efectivo'),
+    ('transferencia', 'Transferencia'),
+    ('otro', 'Otro'),
+]
 
 class Cuota(models.Model):
     prestamo = models.ForeignKey(Prestamo, on_delete=models.CASCADE, related_name='cuotas')
@@ -174,7 +179,12 @@ class Cuota(models.Model):
     fecha_pago_real = models.DateField(null=True, blank=True)
     esta_pagada = models.BooleanField(default=False)
     mora_pagada = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-
+    metodo_pago = models.CharField(
+        max_length=20, 
+        choices=METODOS_PAGO, 
+        default='efectivo'
+    )
+    
     def __str__(self):
         return f"Cuota {self.numero_cuota} de {self.prestamo}"
 
@@ -244,6 +254,11 @@ class Caja(models.Model):
         null=True, 
         blank=True, 
         related_name='movimientos'
+    )
+    metodo_pago = models.CharField(
+        max_length=20, 
+        choices=METODOS_PAGO, 
+        default='efectivo'
     )
 
     @classmethod

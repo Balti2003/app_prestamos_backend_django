@@ -131,7 +131,7 @@ class CajaSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Caja
-        fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada', 'cuota_id', 'prestamo_id']  # noqa: RUF012
+        fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada', 'metodo_pago', 'cuota_id', 'prestamo_id']  # noqa: RUF012
         
     def get_fecha_formateada(self, obj):
         if obj.fecha:
@@ -152,7 +152,7 @@ class HistorialPagosSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Cuota
-        fields = ['id', 'prestamo_id', 'numero_cuota', 'monto_total', 'mora_pagada', 'fecha_pago_real']  # noqa: RUF012
+        fields = ['id', 'prestamo_id', 'numero_cuota', 'monto_total', 'mora_pagada', 'fecha_pago_real', 'metodo_pago']  # noqa: RUF012
 
 
 class ClientePerfilSerializer(serializers.ModelSerializer):
