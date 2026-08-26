@@ -1,5 +1,7 @@
 import django_filters
-from .models import Prestamo, Cuota
+
+from .models import Caja, Cuota, Prestamo
+
 
 class PrestamoFilter(django_filters.FilterSet):
     # Filtro por rango de monto
@@ -11,7 +13,7 @@ class PrestamoFilter(django_filters.FilterSet):
 
     class Meta:
         model = Prestamo
-        fields = ['estado', 'frecuencia', 'cliente']
+        fields = ['estado', 'frecuencia', 'cliente']  # noqa: RUF012
 
 class CuotaFilter(django_filters.FilterSet):
     # Filtro para ver cuotas que vencen en un rango de fechas
@@ -20,4 +22,12 @@ class CuotaFilter(django_filters.FilterSet):
     
     class Meta:
         model = Cuota
-        fields = ['esta_pagada', 'prestamo']
+        fields = ['esta_pagada', 'prestamo']  # noqa: RUF012
+
+class CajaFilter(django_filters.FilterSet):
+    fecha_desde = django_filters.DateFilter(field_name="fecha__date", lookup_expr='gte')
+    fecha_hasta = django_filters.DateFilter(field_name="fecha__date", lookup_expr='lte')
+
+    class Meta:
+        model = Caja
+        fields = ['tipo', 'metodo_pago']  # noqa: RUF012

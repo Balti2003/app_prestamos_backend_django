@@ -17,7 +17,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .filters import CuotaFilter, PrestamoFilter
+from .filters import CajaFilter, CuotaFilter, PrestamoFilter
 from .models import (
     Caja,
     CajaDiaria,
@@ -32,6 +32,7 @@ from .serializers import (
     CajaSerializer,
     CambiarPasswordSerializer,
     ClientePerfilSerializer,
+    ClienteResumenSerializer,
     ClienteSerializer,
     CuotaSerializer,
     GarantiaClienteSerializer,
@@ -49,7 +50,10 @@ def usuario_actual(request):
     return Response(serializer.data)
 
 class ClienteViewSet(viewsets.ModelViewSet):
-    queryset = Cliente.objects.filter(activo=True)
+    queryset = Cliente.objects.filter(activo=True).order_by('-id')
+    
+    filter_backends = [filters.SearchFilter]  # noqa: RUF012
+    search_fields = ['nombre', 'apellido', 'dni'] # noqa: RUF012
     
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -68,6 +72,13 @@ class ClienteViewSet(viewsets.ModelViewSet):
             )
             
         return super().destroy(request, *args, **kwargs)
+    
+    @action(detail=False, methods=['get'], pagination_class=None)
+    def todos(self, request):
+        """Retorna el listado completo sin paginar para selectores en modales"""
+        clientes = self.filter_queryset(self.get_queryset())
+        serializer = ClienteResumenSerializer(clientes, many=True)
+        return Response(serializer.data)
     
     @action(detail=True, methods=['get'])
     def cuotas_cobrables(self, request, pk=None):
@@ -138,7 +149,7 @@ class GarantiaClienteViewSet(viewsets.ModelViewSet):
     
     
 class PrestamoViewSet(viewsets.ModelViewSet):
-    queryset = Prestamo.objects.filter(activo=True)
+    queryset = Prestamo.objects.filter(activo=True).order_by('-id')
     serializer_class = PrestamoSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]  # noqa: RUF012
     filterset_class = PrestamoFilter
@@ -493,9 +504,11 @@ class CuotaViewSet(viewsets.ModelViewSet):
 
 
 class CajaViewSet(viewsets.ModelViewSet):
-    queryset = Caja.objects.all().order_by('-fecha') # Los últimos movimientos primero
+    queryset = Caja.objects.all().order_by('-fecha', '-id')
     serializer_class = CajaSerializer
-
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]  # noqa: RUF012
+    filterset_class = CajaFilter  
+    search_fields = ['concepto']  # noqa: RUF012
 
 class DashboardViewSet(viewsets.ViewSet):
     """
