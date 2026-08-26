@@ -7,11 +7,17 @@ from .models import Caja, CajaDiaria, Prestamo
 @receiver(post_save, sender=Prestamo)
 def registrar_egreso_prestamo(sender, instance, created, **kwargs):
     if created:
-        # Se genera el movimiento de salida cuando nace el préstamo
+        # Tomamos la forma de pago guardada en el préstamo
+        metodo = getattr(instance, 'metodo_pago', 'efectivo') or 'efectivo'
+        cliente_nombre = f"{instance.cliente.nombre.upper()}" if instance.cliente else "CLIENTE"
+
+        # Se genera el movimiento de salida con el método de pago correcto y el préstamo vinculado
         Caja.objects.create(
             tipo='egreso',
             monto=instance.monto_solicitado,
-            concepto=f"Desembolso préstamo #{instance.id} - Cliente: {instance.cliente.nombre}"
+            concepto=f"DESEMBOLSO PRÉSTAMO #{instance.id} - CLIENTE: {cliente_nombre}",
+            metodo_pago=metodo,
+            prestamo=instance       
         )
 
 
@@ -22,12 +28,10 @@ def reajustar_caja_por_desactivacion_prestamo(sender, instance, created, **kwarg
     y devuelve el dinero a la Caja.
     """
     if not created and not instance.activo:
-        # Verificamos que exista una caja diaria abierta para registrar la devolución
         caja_activa = CajaDiaria.objects.filter(estado='ABIERTA').first()
         if not caja_activa:
-            return  # O puedes lanzar una excepción si prefieres bloquear la acción
+            return
 
-        # Revisamos si ya devolvimos el dinero previamente para no duplicar el ingreso
         concepto_devolucion = f"Devolución por anulación de Préstamo #{instance.id}"
         ya_devuelto = Caja.objects.filter(
             prestamo=instance,
@@ -35,12 +39,13 @@ def reajustar_caja_por_desactivacion_prestamo(sender, instance, created, **kwarg
         ).exists()
 
         if not ya_devuelto:
+            metodo = getattr(instance, 'metodo_pago', 'efectivo') or 'efectivo'
             Caja.objects.create(
                 tipo='ingreso',
                 monto=instance.monto_solicitado,
                 concepto=concepto_devolucion,
                 prestamo=instance,
-                metodo_pago='efectivo'
+                metodo_pago=metodo
             )
             print(f"Se reingresaron ${instance.monto_solicitado} a la caja por anulación del Préstamo #{instance.id}.")
 
@@ -55,10 +60,11 @@ def reajustar_caja_por_borrado_fisico_prestamo(sender, instance, **kwargs):
     if not caja_activa:
         return
 
+    metodo = getattr(instance, 'metodo_pago', 'efectivo') or 'efectivo'
     Caja.objects.create(
         tipo='ingreso',
         monto=instance.monto_solicitado,
         concepto=f"Devolución por borrado físico de Préstamo #{instance.id}",
-        metodo_pago='efectivo'
+        metodo_pago=metodo
     )
     print(f"Se reingresaron ${instance.monto_solicitado} a la caja por eliminación del Préstamo #{instance.id}.")

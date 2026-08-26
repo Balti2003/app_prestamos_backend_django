@@ -66,6 +66,11 @@ class Prestamo(models.Model):
     fecha_inicio = models.DateField(default=timezone.now, blank=True, null=True)
     estado = models.CharField(max_length=15, choices=ESTADOS, default='activo')
     activo = models.BooleanField(default=True)
+    metodo_pago = models.CharField(
+        max_length=50, 
+        default='efectivo', 
+        help_text="Forma de pago pactada para el préstamo"
+    ) 
     
     def delete(self, *args, **kwargs ):
         self.activo = False

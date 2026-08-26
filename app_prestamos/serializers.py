@@ -65,8 +65,9 @@ class PrestamoSerializer(serializers.ModelSerializer):
     cliente_nombre = serializers.ReadOnlyField(source='cliente.apellido')
     cliente_detail = ClienteResumenSerializer(source='cliente', read_only=True)
     cuotas_pagadas_count = serializers.SerializerMethodField()
-    cantidad_cuotas = serializers.ReadOnlyField(source='cuotas_totales')
+    cantidad_cuotas = serializers.IntegerField(source='cuotas_totales', required=False)
     monto_cuota = serializers.SerializerMethodField()
+    metodo_pago_detalle = serializers.CharField(write_only=True, required=False, allow_blank=True)
     
     fecha_inicio = serializers.DateField(
         format="%Y-%m-%d", 
@@ -78,6 +79,28 @@ class PrestamoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Prestamo
         fields = '__all__'
+        extra_kwargs = {  # noqa: RUF012
+            'cuotas_totales': {'required': False},
+            'estado': {'required': False},
+            'activo': {'required': False},
+            'monto_total': {'required': False},
+        }
+
+    def to_internal_value(self, data):
+        # Si el frontend envía 'cantidad_cuotas', lo copiamos a 'cuotas_totales'
+        data_dict = data.copy() if hasattr(data, 'copy') else dict(data)
+        if 'cantidad_cuotas' in data_dict and 'cuotas_totales' not in data_dict:
+            data_dict['cuotas_totales'] = data_dict['cantidad_cuotas']
+        return super().to_internal_value(data_dict)
+
+    def create(self, validated_data):
+        metodo_pago_detalle = validated_data.pop('metodo_pago_detalle', '').strip()
+        metodo_pago_raw = validated_data.get('metodo_pago', 'efectivo')
+
+        if str(metodo_pago_raw).lower() == 'otro' and metodo_pago_detalle:
+            validated_data['metodo_pago'] = metodo_pago_detalle
+
+        return super().create(validated_data)
 
     def get_monto_cuota(self, obj):
         cuota = self._get_cuotas_qs(obj).first()

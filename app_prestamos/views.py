@@ -39,7 +39,7 @@ from .serializers import (
     PrestamoSerializer,
     UserSerializer,
 )
-from .utils import generar_pdf_desembolso_seguro
+from .utils import generar_pdf_desembolso_seguro, generar_recibo_pago_pdf
 
 
 @api_view(['GET'])
@@ -213,11 +213,18 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         1. Mora de la cuota vencida más antigua.
         2. Saldo de capital/interés pendiente de esa cuota.
         3. El sobrante continúa hacia las siguientes cuotas (pagos parciales / adelantados).
-        4. Asienta el ingreso del dinero real percibido en la caja.
+        4. Asienta el ingreso del dinero real percibido en la caja con su método/detalle de pago.
         """
         prestamo = self.get_object()
         monto_raw = request.data.get('monto')
-        metodo_pago = request.data.get('metodo_pago', 'efectivo')
+        
+        metodo_pago_raw = request.data.get('metodo_pago', 'efectivo')
+        metodo_pago_detalle = str(request.data.get('metodo_pago_detalle', '')).strip()
+
+        if str(metodo_pago_raw).lower() == 'otro' and metodo_pago_detalle:
+            metodo_pago_final = metodo_pago_detalle
+        else:
+            metodo_pago_final = metodo_pago_raw
         
         if monto_raw is None or monto_raw == "":
             return Response({"error": "Debe proporcionar el monto del pago."}, status=status.HTTP_400_BAD_REQUEST)
@@ -264,7 +271,8 @@ class PrestamoViewSet(viewsets.ModelViewSet):
                         cuota.esta_pagada = True
                         cuota.fecha_pago_real = timezone.localdate()
 
-                cuota.metodo_pago = metodo_pago
+                # Guardamos el método o detalle descriptivo en la cuota
+                cuota.metodo_pago = metodo_pago_final
                 cuota.save()
 
                 desglose.append({
@@ -291,7 +299,7 @@ class PrestamoViewSet(viewsets.ModelViewSet):
                     tipo='ingreso',
                     monto=monto_aplicado,
                     concepto=concepto,
-                    metodo_pago=metodo_pago,
+                    metodo_pago=metodo_pago_final,
                     prestamo=prestamo,
                     cuota_id=cuota_impactada_id
                 )
@@ -316,18 +324,18 @@ class PrestamoViewSet(viewsets.ModelViewSet):
                 "desglose": desglose
             }, status=status.HTTP_200_OK)
 
-        @action(detail=False, methods=['post'])
-        def sincronizar_mora(self, request):
-            prestamos_activos = Prestamo.objects.filter(estado__in=['activo', 'mora'])
-            actualizados = 0
-                
-            for p in prestamos_activos:
-                if hasattr(p, 'actualizar_estado_mora') and p.actualizar_estado_mora():
-                    actualizados += 1
-                        
-            return Response({
-                "message": f"Sincronización completada. {actualizados} préstamos cambiaron de estado."
-            })
+    @action(detail=False, methods=['post'])
+    def sincronizar_mora(self, request):
+        prestamos_activos = Prestamo.objects.filter(estado__in=['activo', 'mora'])
+        actualizados = 0
+            
+        for p in prestamos_activos:
+            if hasattr(p, 'actualizar_estado_mora') and p.actualizar_estado_mora():
+                actualizados += 1
+                    
+        return Response({
+            "message": f"Sincronización completada. {actualizados} préstamos cambiaron de estado."
+        })
 
 
 class CuotaViewSet(viewsets.ModelViewSet):
@@ -401,7 +409,6 @@ class CuotaViewSet(viewsets.ModelViewSet):
     def generar_recibo(self, request, pk=None):
         cuota = self.get_object()
         
-        # 1. Validamos que la cuota tenga al menos UN abono registrado (monto_pagado > 0 o mora_pagada > 0)
         monto_pagado = getattr(cuota, 'monto_pagado', Decimal('0.00'))
         mora_pagada = getattr(cuota, 'mora_pagada', Decimal('0.00'))
         
@@ -411,96 +418,17 @@ class CuotaViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        buffer = BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50)
-        styles = getSampleStyleSheet()
-        elements = []
-
-        # --- ENCABEZADO ---
-        titulo_style = ParagraphStyle('TituloStyle', parent=styles['Heading1'], fontSize=18, alignment=1, spaceAfter=20)
-        elements.append(Paragraph("COMPROBANTE DE PAGO", titulo_style))
-        elements.append(Paragraph("<b>Sistema de Gestión de Préstamos</b>", styles['Normal']))
-        fecha_local = timezone.localtime(timezone.now())
-        elements.append(Paragraph(f"Fecha de emisión: {fecha_local.strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
-        elements.append(Spacer(1, 20))
-
-        # --- DATOS DEL CLIENTE Y PRÉSTAMO ---
-        estado_cuota = "COMPLETADA / SALDADA" if cuota.esta_pagada else "PAGO PARCIAL"
-        
-        data_cliente = [
-            [Paragraph(f"<b>Cliente:</b> {cuota.prestamo.cliente.nombre} {cuota.prestamo.cliente.apellido}", styles['Normal']), 
-             Paragraph(f"<b>DNI/CUIL:</b> {getattr(cuota.prestamo.cliente, 'dni', '---')}", styles['Normal'])],
-            [Paragraph(f"<b>Préstamo ID:</b> #{cuota.prestamo.id}", styles['Normal']), 
-             Paragraph(f"<b>Cuota N°:</b> {cuota.numero_cuota} <i>({estado_cuota})</i>", styles['Normal'])]
-        ]
-        t_cliente = Table(data_cliente, colWidths=[250, 200])
-        elements.append(t_cliente)
-        elements.append(Spacer(1, 20))
-
-        # --- CÁLCULOS DEL DETALLE DE PAGO ---
-        monto_total_cuota = getattr(cuota, 'monto_total', Decimal('0.00'))
-        saldo_pendiente = getattr(cuota, 'saldo_pendiente', max(Decimal('0.00'), monto_total_cuota - monto_pagado))
-        total_abonado = monto_pagado + mora_pagada
-
-        # ⚡ Determinamos la forma de pago legible
-        metodo_pago_str = cuota.get_metodo_pago_display().upper() if hasattr(cuota, 'get_metodo_pago_display') else str(getattr(cuota, 'metodo_pago', 'efectivo')).upper()
-
-        # --- TABLA DE DETALLE DEL PAGO ---
-        data_pago = [
-            ['Descripción', 'Monto / Detalle'],
-            ['Monto Total de la Cuota', f"${monto_total_cuota:,.2f}"],
-            ['Abono Realizado a Capital', f"${monto_pagado:,.2f}"],
-            ['Intereses por Mora Abonados', f"${mora_pagada:,.2f}"],
-            [Paragraph('<b>TOTAL ABONADO</b>', styles['Normal']), f'${total_abonado:,.2f}'],
-            ['Forma de Pago', metodo_pago_str]
-        ]
-
-        # Si la cuota aún no está totalmente saldada, agregamos la fila con lo que resta
-        if not cuota.esta_pagada and saldo_pendiente > 0:
-            data_pago.append(['Saldo Restante Pendiente', f"${saldo_pendiente:,.2f}"])
-
-        t_pago = Table(data_pago, colWidths=[350, 100])
-        
-        # Estilos dinámicos para la tabla según si tiene saldo restante o no
-        cant_filas = len(data_pago)
-        t_pago_style = [
-            ('BACKGROUND', (0, 0), (1, 0), colors.grey),
-            ('TEXTCOLOR', (0, 0), (1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (1, 0), 'CENTER'),
-            ('FONTNAME', (0, 0), (1, 0), 'Helvetica-Bold'),
-            ('BOTTOMPADDING', (0, 0), (1, 0), 12),
-            ('BACKGROUND', (0, 4), (1, 4), colors.lightgrey), # Fila del TOTAL ABONADO
-            ('GRID', (0, 0), (1, cant_filas - 1), 1, colors.black),
-            ('ALIGN', (1, 1), (1, cant_filas - 1), 'RIGHT'),
-        ]
-
-        if not cuota.esta_pagada and saldo_pendiente > 0:
-            # Resaltamos en amarillo/alerta suave el saldo restante (ahora en el índice 6 por la fila agregada)
-            t_pago_style.append(('BACKGROUND', (0, 6), (1, 6), colors.HexColor("#FFF9C4")))
-
-        t_pago.setStyle(TableStyle(t_pago_style))
-        elements.append(t_pago)
-        elements.append(Spacer(1, 40))
-
-        # --- FIRMA Y PIE ---
         cobrador = request.user.get_full_name() or request.user.username if request.user and request.user.is_authenticated else "Sistema"
-        elements.append(Paragraph(f"Cobrado por: {cobrador}", styles['Normal']))
-        elements.append(Spacer(1, 30))
-        elements.append(Paragraph("__________________________", styles['Normal']))
-        elements.append(Paragraph("Firma y Sello del Receptor", styles['Normal']))
         
-        elements.append(Spacer(1, 50))
-        nota_style = ParagraphStyle('NotaStyle', parent=styles['Normal'], fontSize=8, textColor=colors.grey)
-        elements.append(Paragraph(
-            "Este documento sirve como comprobante legal de pago/abono efectuado para el período mencionado. Conserve este recibo para cualquier reclamo futuro.", 
-            nota_style
-        ))
-
-        doc.build(elements)
-        buffer.seek(0)
+        # Generación delegada a utils.py
+        buffer = generar_recibo_pago_pdf(cuota, cobrador_nombre=cobrador)
         
         filename = f"Recibo_P#{cuota.prestamo.id}_C#{cuota.numero_cuota}.pdf"
-        return HttpResponse(buffer, content_type='application/pdf', headers={'Content-Disposition': f'attachment; filename="{filename}"'})
+        return HttpResponse(
+            buffer, 
+            content_type='application/pdf', 
+            headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+        )
 
 
 class CajaViewSet(viewsets.ModelViewSet):
