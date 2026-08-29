@@ -6,21 +6,106 @@ from rest_framework import serializers
 
 from .models import Caja, CajaDiaria, Cliente, Cuota, GarantiaCliente, Prestamo
 
+DIAS_SEMANA = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+
+def calcular_estado_financiero_cliente(cliente_obj):
+    """
+    Calcula el estado del semáforo, la frecuencia del préstamo activo y
+    las fechas exactas con día de la semana (inicio y próximo vencimiento).
+    """
+    hoy = timezone.localdate()
+    
+    # Obtenemos las cuotas impagas del préstamo activo ordenadas por vencimiento
+    cuotas_pendientes = Cuota.objects.filter(
+        prestamo__cliente=cliente_obj,
+        prestamo__activo=True,
+        esta_pagada=False
+    ).select_related('prestamo').order_by('fecha_vencimiento')
+
+    if not cuotas_pendientes.exists():
+        return {
+            'estado': 'sin_deuda',
+            'label': 'SIN DEUDA',
+            'dias_restantes': None,
+            'frecuencia': None,
+            'proximo_vencimiento_texto': None,
+            'fecha_inicio_texto': None,
+        }
+
+    primera_cuota = cuotas_pendientes.first()
+    prestamo = primera_cuota.prestamo
+    fecha_venc = primera_cuota.fecha_vencimiento
+    fecha_ini = prestamo.fecha_inicio
+    dias_diferencia = (fecha_venc - hoy).days
+
+    # Formateo con día de la semana en español (Ej: "Martes 08/09")
+    dia_venc_nombre = DIAS_SEMANA[fecha_venc.weekday()]
+    vencimiento_formateado = f"{dia_venc_nombre} {fecha_venc.strftime('%d/%m')}"
+
+    dia_ini_nombre = DIAS_SEMANA[fecha_ini.weekday()] if fecha_ini else None
+    inicio_formateado = f"{dia_ini_nombre} {fecha_ini.strftime('%d/%m')}" if fecha_ini else None
+
+    # Determinamos el estado del semáforo con los textos limpios
+    if dias_diferencia < 0:
+        dias_abs = abs(dias_diferencia)
+        estado = 'moroso'
+        label = f"PAGO ATRASADO ({dias_abs} {'DÍA' if dias_abs == 1 else 'DÍAS'})"
+    elif 0 <= dias_diferencia <= 2:
+        estado = 'por_vencer'
+        if dias_diferencia == 0:
+            label = "VENCE HOY"
+        elif dias_diferencia == 1:
+            label = "FALTA 1 DÍA"
+        else:
+            label = f"FALTAN {dias_diferencia} DÍAS"
+    else:
+        estado = 'al_dia'
+        label = 'AL DÍA'
+
+    return {
+        'estado': estado,
+        'label': label,
+        'dias_restantes': dias_diferencia,
+        'frecuencia': prestamo.frecuencia,  # 'diario', 'semanal', 'quincenal', 'mensual'
+        'proximo_vencimiento_texto': vencimiento_formateado,
+        'fecha_inicio_texto': inicio_formateado,
+        'numero_cuota_pendiente': primera_cuota.numero_cuota,
+        'cuotas_totales': prestamo.cuotas_totales
+    }
+
 
 class ClienteSerializer(serializers.ModelSerializer):
     prestamos_activos = serializers.SerializerMethodField()
     tiene_mora = serializers.SerializerMethodField()
-    
+    estado_financiero = serializers.SerializerMethodField()
+
     class Meta:
         model = Cliente
-        fields = ['id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 'tiene_mora', 'prestamos_activos']  # noqa: RUF012
-    
+        fields = [  # noqa: RUF012
+            'id', 
+            'nombre', 
+            'apellido', 
+            'dni', 
+            'telefono', 
+            'direccion', 
+            'tiene_mora', 
+            'estado_financiero', 
+            'prestamos_activos'
+        ]
+
     def get_tiene_mora(self, obj):
-        return obj.prestamos.filter(cuotas__esta_pagada=False, cuotas__fecha_vencimiento__lt=timezone.localdate()).exists()
+        return obj.prestamos.filter(
+            activo=True,
+            cuotas__esta_pagada=False, 
+            cuotas__fecha_vencimiento__lt=timezone.localdate()
+        ).exists()
 
     def get_prestamos_activos(self, obj):
         prestamos = obj.prestamos.filter(estado__in=['activo', 'mora'], activo=True)
         return PrestamoMiniSerializer(prestamos, many=True).data
+
+    def get_estado_financiero(self, obj):
+        return calcular_estado_financiero_cliente(obj)
 
 
 class ClienteResumenSerializer(serializers.ModelSerializer):
@@ -44,7 +129,7 @@ class GarantiaClienteSerializer(serializers.ModelSerializer):
                 return request.build_absolute_uri(obj.archivo.url)
             return obj.archivo.url
         return None
-    
+
 
 class CuotaSerializer(serializers.ModelSerializer):
     total_con_mora = serializers.ReadOnlyField()
@@ -87,7 +172,6 @@ class PrestamoSerializer(serializers.ModelSerializer):
         }
 
     def to_internal_value(self, data):
-        # Si el frontend envía 'cantidad_cuotas', lo copiamos a 'cuotas_totales'
         data_dict = data.copy() if hasattr(data, 'copy') else dict(data)
         if 'cantidad_cuotas' in data_dict and 'cuotas_totales' not in data_dict:
             data_dict['cuotas_totales'] = data_dict['cantidad_cuotas']
@@ -135,6 +219,7 @@ class PrestamoMiniSerializer(serializers.ModelSerializer):
             'cuotas_pagadas', 
             'monto_cuota', 
             'estado',
+            'metodo_pago',
             'plan_pagos'
         ]
 
@@ -182,13 +267,26 @@ class ClientePerfilSerializer(serializers.ModelSerializer):
     prestamos_activos = serializers.SerializerMethodField()
     metricas_comportamiento = serializers.SerializerMethodField()
     historial_pagos = serializers.SerializerMethodField()
+    estado_financiero = serializers.SerializerMethodField()
+    tiene_mora = serializers.SerializerMethodField()
 
     class Meta:
         model = Cliente
         fields = [  # noqa: RUF012
             'id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 
+            'tiene_mora', 'estado_financiero',
             'prestamos_activos', 'metricas_comportamiento', 'historial_pagos', 'garantias'
         ]
+
+    def get_tiene_mora(self, obj):
+        return obj.prestamos.filter(
+            activo=True,
+            cuotas__esta_pagada=False, 
+            cuotas__fecha_vencimiento__lt=timezone.localdate()
+        ).exists()
+
+    def get_estado_financiero(self, obj):
+        return calcular_estado_financiero_cliente(obj)
 
     def get_prestamos_activos(self, obj):
         prestamos = obj.prestamos.filter(estado__in=['activo', 'mora'], activo=True)
@@ -224,7 +322,7 @@ class ClientePerfilSerializer(serializers.ModelSerializer):
             esta_pagada=True
         ).order_by('-fecha_pago_real')
         return HistorialPagosSerializer(cuotas, many=True).data
-    
+
 
 class CambiarPasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(required=True, write_only=True)
