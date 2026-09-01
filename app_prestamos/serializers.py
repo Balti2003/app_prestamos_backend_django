@@ -4,7 +4,15 @@ from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
 
-from .models import Caja, CajaDiaria, Cliente, Cuota, GarantiaCliente, Prestamo
+from .models import (
+    Caja,
+    CajaDiaria,
+    Cliente,
+    Cuota,
+    GarantiaCliente,
+    PermisosOperador,
+    Prestamo,
+)
 
 DIAS_SEMANA = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 
@@ -347,11 +355,75 @@ class CajaDiariaSerializer(serializers.ModelSerializer):
         model = CajaDiaria
         fields = '__all__'
 
+class PermisosOperadorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PermisosOperador
+        exclude = ['id', 'user']  # noqa: RUF012
+
+class CrearOperadorSerializer(serializers.Serializer):
+    username = serializers.CharField(required=True)
+    first_name = serializers.CharField(required=True)
+    last_name = serializers.CharField(required=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    password = serializers.CharField(write_only=True, required=True)
+    
+    # Permisos individuales
+    puede_crear_prestamo = serializers.BooleanField(default=True)
+    puede_cobrar_cuota = serializers.BooleanField(default=True)
+    puede_crear_cliente = serializers.BooleanField(default=True)
+    puede_editar_cliente = serializers.BooleanField(default=False)
+    puede_eliminar_cliente = serializers.BooleanField(default=False)
+    puede_ver_caja = serializers.BooleanField(default=False)
+    puede_ver_metricas = serializers.BooleanField(default=False)
+
+    def validate_username(self, value):
+        if User.objects.filter(username=value).exists():
+            raise serializers.ValidationError("El nombre de usuario ya está en uso.")
+        return value
+
+    def create(self, validated_data):
+        # Extraemos los campos de usuario
+        username = validated_data.pop('username')
+        password = validated_data.pop('password')
+        first_name = validated_data.pop('first_name')
+        last_name = validated_data.pop('last_name')
+        email = validated_data.pop('email', '')
+
+        # 1. Creamos el usuario operador (is_staff=False)
+        user = User.objects.create_user(
+            username=username,
+            email=email,
+            password=password,
+            first_name=first_name,
+            last_name=last_name,
+            is_staff=False
+        )
+
+        # 2. Guardamos sus permisos personalizados
+        PermisosOperador.objects.create(user=user, **validated_data)
+        return user
 
 class UserSerializer(serializers.ModelSerializer):
-    """Serializer para devolver el usuario autenticado y su rol al frontend"""
     es_admin = serializers.BooleanField(source='is_staff')
+    permisos = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'es_admin']  # noqa: RUF012
+        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'es_admin', 'permisos']  # noqa: RUF012
+
+    def get_permisos(self, obj):
+        if obj.is_staff:
+            # El administrador tiene todos los permisos activos por defecto
+            return {
+                'puede_crear_prestamo': True,
+                'puede_cobrar_cuota': True,
+                'puede_crear_cliente': True,
+                'puede_editar_cliente': True,
+                'puede_eliminar_cliente': True,
+                'puede_ver_caja': True,
+                'puede_ver_metricas': True,
+            }
+        
+        # Si es operador, buscamos sus permisos o creamos unos por defecto
+        permisos_obj, _ = PermisosOperador.objects.get_or_create(user=obj)
+        return PermisosOperadorSerializer(permisos_obj).data

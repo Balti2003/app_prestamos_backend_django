@@ -1,5 +1,4 @@
 from decimal import Decimal, InvalidOperation
-from io import BytesIO
 from xml.dom import ValidationErr
 
 from django.db import transaction
@@ -7,13 +6,9 @@ from django.db.models import Sum
 from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from rest_framework import filters, parsers, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -34,6 +29,7 @@ from .serializers import (
     ClientePerfilSerializer,
     ClienteResumenSerializer,
     ClienteSerializer,
+    CrearOperadorSerializer,
     CuotaSerializer,
     GarantiaClienteSerializer,
     PrestamoSerializer,
@@ -432,11 +428,26 @@ class CuotaViewSet(viewsets.ModelViewSet):
 
 
 class CajaViewSet(viewsets.ModelViewSet):
-    queryset = Caja.objects.all().order_by('-fecha', '-id')
+    queryset = Caja.objects.all()
     serializer_class = CajaSerializer
+    permission_classes = [IsAuthenticated]  # noqa: RUF012
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]  # noqa: RUF012
     filterset_class = CajaFilter  
     search_fields = ['concepto']  # noqa: RUF012
+
+    def get_queryset(self):
+        user = self.request.user
+
+        # 1. Si no está autenticado, no retorna nada
+        if not user.is_authenticated:
+            return Caja.objects.none()
+
+        # 2. Si es Admin o tiene el permiso 'puede_ver_caja', ve todos los movimientos
+        if user.is_staff or (hasattr(user, 'permisos_custom') and user.permisos_custom.puede_ver_caja):
+            return Caja.objects.all().order_by('-fecha', '-id')
+
+        # 3. Operador sin permiso asignado -> Retorna lista vacía
+        return Caja.objects.none()
 
 class DashboardViewSet(viewsets.ViewSet):
     """
@@ -583,3 +594,13 @@ class CajaDiariaViewSet(viewsets.ModelViewSet):
                 return Response(serializer.data, status=status.HTTP_200_OK)
         except Exception as e:  # noqa: BLE001
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+class CrearOperadorView(APIView):
+    permission_classes = [IsAdminUser]  # noqa: RUF012
+
+    def post(self, request):
+        serializer = CrearOperadorSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

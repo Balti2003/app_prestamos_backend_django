@@ -26,6 +26,18 @@ class Cliente(models.Model):
         self.activo = False
         self.save()
 
+class PermisosOperador(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='permisos_custom')
+    puede_crear_prestamo = models.BooleanField(default=True)
+    puede_cobrar_cuota = models.BooleanField(default=True)
+    puede_crear_cliente = models.BooleanField(default=True)
+    puede_editar_cliente = models.BooleanField(default=False)
+    puede_eliminar_cliente = models.BooleanField(default=False)
+    puede_ver_caja = models.BooleanField(default=False)
+    puede_ver_metricas = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f"Permisos de {self.user.username}"
 
 def cliente_garantia_path(instance, filename):
     # Organiza las descargas en carpetas por DNI del cliente
