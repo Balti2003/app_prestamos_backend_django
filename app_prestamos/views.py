@@ -2,7 +2,6 @@ from decimal import Decimal, InvalidOperation
 from xml.dom import ValidationErr
 
 from django.db import transaction
-from django.db.models import Sum
 from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -449,38 +448,6 @@ class CajaViewSet(viewsets.ModelViewSet):
         # 3. Operador sin permiso asignado -> Retorna lista vacía
         return Caja.objects.none()
 
-class DashboardViewSet(viewsets.ViewSet):
-    """
-    Vista para obtener las estadísticas del Dashboard en tiempo real.
-    """
-    def list(self, request):
-        hoy = timezone.localdate()
-        
-        # 1. Cobros esperados HOY (Suma de cuotas que vencen hoy y no están pagas)
-        cobros_hoy = Cuota.objects.filter(
-            fecha_vencimiento=hoy, 
-            esta_pagada=False
-        ).aggregate(total=Sum('monto_total'))['total'] or Decimal('0.00')
-
-        # 2. Alerta Crítica (Cuentas que están actualmente en estado MORA)
-        cuentas_mora = Prestamo.objects.filter(estado='mora', activo=True).count()
-
-        # 3. Cartera Total (Clientes que tienen préstamos sin finalizar)
-        cartera_total = Cliente.objects.filter(
-            prestamos__estado__in=['activo', 'mora'],
-            activo=True
-        ).distinct().count()
-
-        # 4. Saldo en Caja (Usando el método que ya tenés en tu modelo Caja)
-        saldo_caja = Caja.saldo_actual()
-
-        return Response({
-            "cobros_esperados_hoy": float(cobros_hoy),
-            "cuentas_en_mora": cuentas_mora,
-            "cartera_total": cartera_total,
-            "saldo_caja": float(saldo_caja),
-            "ultima_actualizacion": timezone.localtime().strftime('%H:%M:%S')
-        })
 
 class CambiarPasswordView(APIView):
     permission_classes = [IsAuthenticated]  # noqa: RUF012
