@@ -8,6 +8,9 @@ djangorestframework_simplejwt==5.5.1
 mysqlclient==2.2.8
 pillow==12.2.0
 PyJWT==2.12.1
+python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 reportlab==4.4.10
+six==1.17.0
 sqlparse==0.5.5
+whitenoise==6.12.0
