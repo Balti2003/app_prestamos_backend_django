@@ -4,16 +4,18 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Cargar variables de entorno
-load_dotenv()
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv('SECRET_KEY')
+load_dotenv(os.path.join(BASE_DIR, '.env'))
 
-DEBUG = os.getenv('DEBUG') == 'True'
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-fallback-default-key')
 
-ALLOWED_HOSTS = []
+# Se convierte en False si DEBUG='False' en el .env
+DEBUG = os.environ.get('DEBUG', 'False').lower() in ['true', '1', 'yes']
+
+# Permite múltiples hosts separados por coma en el .env
+allowed_hosts_env = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1')
+ALLOWED_HOSTS = [host.strip() for host in allowed_hosts_env.split(',') if host.strip()]
 
 # Application definition
 
@@ -149,7 +151,10 @@ STORAGES = {
     },
 }
 
-CORS_ALLOW_ALL_ORIGINS = True
+cors_origins_env = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://127.0.0.1:5173')
+CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins_env.split(',') if origin.strip()]
+
+#CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
 # Ruta pública para acceder a los archivos desde la URL
