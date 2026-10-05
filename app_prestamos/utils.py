@@ -30,19 +30,49 @@ def generar_pdf_desembolso_seguro(prestamo, operador_nombre=""):
     title_style = ParagraphStyle(
         'TitleStyle',
         parent=styles['Heading1'],
-        fontSize=16,
-        leading=20,
+        fontSize=15,
+        leading=18,
         textColor=colors.HexColor("#07080a"),
         alignment=1,
-        spaceAfter=15
+        spaceAfter=10
+    )
+    empresa_title_style = ParagraphStyle(
+        'EmpresaTitle',
+        parent=styles['Heading2'],
+        fontSize=16,
+        leading=20,
+        textColor=colors.HexColor("#1e293b"),
+        alignment=1,
+        fontName="Helvetica-Bold",
+        spaceAfter=4
+    )
+    empresa_sub_style = ParagraphStyle(
+        'EmpresaSub',
+        parent=styles['Normal'],
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#64748b"),
+        alignment=1,
+        spaceAfter=12
     )
     label_style = ParagraphStyle('LabelStyle', parent=styles['Normal'], fontSize=10, leading=12, textColor=colors.HexColor("#4b5563"))
     value_style = ParagraphStyle('ValueStyle', parent=styles['Normal'], fontSize=10, leading=12, fontName="Helvetica-Bold", textColor=colors.HexColor("#111827"))
 
-    # Encabezado
+    # Datos de la Empresa (Tenant)
+    empresa = getattr(prestamo, 'empresa', None)
+    nombre_empresa = getattr(empresa, 'nombre', 'PRESTAYA SERVICIOS FINANCIEROS')
+    cuit_empresa = getattr(empresa, 'cuit_rut', '')
+
+    # Encabezado Membretado
+    story.append(Paragraph(nombre_empresa.upper(), empresa_title_style))
+    if cuit_empresa:
+        story.append(Paragraph(f"CUIT/RUT: {cuit_empresa}", empresa_sub_style))
+    else:
+        story.append(Spacer(1, 6))
+
     story.append(Paragraph("<b>COMPROBANTE DE DESEMBOLSO DE PRÉSTAMO</b>", title_style))
     
-    # Obtener fecha de inicio o creación de forma segura
+    # Obtener fecha de inicio o creación
     fecha_str = getattr(prestamo, 'fecha_inicio', None) or getattr(prestamo, 'fecha_creacion', None)
     if hasattr(fecha_str, 'strftime'):
         fecha_str = fecha_str.strftime('%d/%m/%Y')
@@ -74,13 +104,11 @@ def generar_pdf_desembolso_seguro(prestamo, operador_nombre=""):
     cuotas_totales = prestamo.cuotas_totales
     tasa_interes = float(prestamo.tasa_interes)
 
-    # 1. Buscamos primero la cuota real generada en la base de datos
     monto_cuota = 0
     if hasattr(prestamo, 'cuota_set') and prestamo.cuota_set.exists():
         primera_cuota = prestamo.cuota_set.first()
         monto_cuota = float(primera_cuota.monto_total)
     
-    # 2. Si por alguna razón no hay cuotas en DB, aplicamos tu misma fórmula exacta
     if monto_cuota == 0 and cuotas_totales > 0:
         interes_total = monto_solicitado * (tasa_interes / 100.0)
         monto_total_a_pagar = monto_solicitado + interes_total
@@ -102,14 +130,13 @@ def generar_pdf_desembolso_seguro(prestamo, operador_nombre=""):
 
     story.append(Spacer(1, 35))
 
-    # Texto de conformidad y espacio de firma
     texto_conformidad = "Declaro haber recibido en conformidad el dinero en efectivo detallado anteriormente en concepto de desembolso de préstamo."
     story.append(Paragraph(f"<i>{texto_conformidad}</i>", label_style))
     story.append(Spacer(1, 50))
 
     tabla_firma = [
         [Paragraph("___________________________________", ParagraphStyle('C', alignment=1)), Paragraph("___________________________________", ParagraphStyle('C', alignment=1))],
-        [Paragraph("<b>Firma del Cliente</b>", ParagraphStyle('C', alignment=1, fontSize=9)), Paragraph("<b>Firma y Sello Financiera</b>", ParagraphStyle('C', alignment=1, fontSize=9))]
+        [Paragraph("<b>Firma del Cliente</b>", ParagraphStyle('C', alignment=1, fontSize=9)), Paragraph(f"<b>Firma y Sello - {nombre_empresa}</b>", ParagraphStyle('C', alignment=1, fontSize=9))]
     ]
     t_firma = Table(tabla_firma, colWidths=[250, 250])
     story.append(t_firma)
@@ -120,22 +147,38 @@ def generar_pdf_desembolso_seguro(prestamo, operador_nombre=""):
 
 
 def generar_recibo_pago_pdf(cuota, cobrador_nombre="Sistema"):
-    """
-    Construye el documento ReportLab para el comprobante de pago de una cuota
-    y retorna el buffer en memoria listo para ser enviado en un HttpResponse.
-    """
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50)
     styles = getSampleStyleSheet()
     elements = []
 
-    # --- ENCABEZADO ---
-    titulo_style = ParagraphStyle('TituloStyle', parent=styles['Heading1'], fontSize=18, alignment=1, spaceAfter=20)
-    elements.append(Paragraph("COMPROBANTE DE PAGO", titulo_style))
-    elements.append(Paragraph("<b>Sistema de Gestión de Préstamos</b>", styles['Normal']))
+    # Datos de la Empresa (Tenant)
+    empresa = getattr(cuota.prestamo, 'empresa', None)
+    nombre_empresa = getattr(empresa, 'nombre', 'PRESTAYA SERVICIOS FINANCIEROS')
+    cuit_empresa = getattr(empresa, 'cuit_rut', '')
+
+    # --- ENCABEZADO MEMBRETADO ---
+    empresa_title_style = ParagraphStyle(
+        'EmpresaTitle',
+        parent=styles['Heading1'],
+        fontSize=18,
+        alignment=1,
+        fontName="Helvetica-Bold",
+        textColor=colors.HexColor("#1e293b"),
+        spaceAfter=2
+    )
+    cuit_style = ParagraphStyle('CuitStyle', parent=styles['Normal'], fontSize=9, alignment=1, textColor=colors.HexColor("#64748b"), spaceAfter=12)
+    titulo_style = ParagraphStyle('TituloStyle', parent=styles['Heading2'], fontSize=14, alignment=1, spaceAfter=15, textColor=colors.HexColor("#0f172a"))
+
+    elements.append(Paragraph(nombre_empresa.upper(), empresa_title_style))
+    if cuit_empresa:
+        elements.append(Paragraph(f"CUIT/RUT: {cuit_empresa}", cuit_style))
+    
+    elements.append(Paragraph("<b>COMPROBANTE OFICIAL DE PAGO</b>", titulo_style))
+    
     fecha_local = timezone.localtime(timezone.now())
-    elements.append(Paragraph(f"Fecha de emisión: {fecha_local.strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
-    elements.append(Spacer(1, 20))
+    elements.append(Paragraph(f"Fecha y hora de emisión: {fecha_local.strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
+    elements.append(Spacer(1, 15))
 
     # --- DATOS DEL CLIENTE Y PRÉSTAMO ---
     estado_cuota = "COMPLETADA / SALDADA" if cuota.esta_pagada else "PAGO PARCIAL"
@@ -159,7 +202,6 @@ def generar_recibo_pago_pdf(cuota, cobrador_nombre="Sistema"):
     saldo_pendiente = getattr(cuota, 'saldo_pendiente', max(Decimal('0.00'), monto_total_cuota - monto_pagado))
     total_abonado = monto_pagado + mora_pagada
 
-    # Determinación de forma de pago legible
     metodo_raw = str(getattr(cuota, 'metodo_pago', 'efectivo') or 'efectivo').strip()
     if metodo_raw.lower() == 'efectivo':
         metodo_pago_str = 'EFECTIVO'
@@ -207,7 +249,7 @@ def generar_recibo_pago_pdf(cuota, cobrador_nombre="Sistema"):
     elements.append(Paragraph(f"Cobrado por: {cobrador_nombre}", styles['Normal']))
     elements.append(Spacer(1, 30))
     elements.append(Paragraph("__________________________", styles['Normal']))
-    elements.append(Paragraph("Firma y Sello del Receptor", styles['Normal']))
+    elements.append(Paragraph(f"Firma y Sello - {nombre_empresa}", styles['Normal']))
     
     elements.append(Spacer(1, 50))
     nota_style = ParagraphStyle('NotaStyle', parent=styles['Normal'], fontSize=8, textColor=colors.grey)

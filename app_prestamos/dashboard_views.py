@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from django.db.models import Avg, Sum
 from django.utils import timezone
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -11,33 +12,40 @@ from rest_framework.views import APIView
 from .models import Caja, Cliente, Cuota, Prestamo
 
 
+def get_user_empresa(user):
+    if hasattr(user, 'perfil') and user.perfil.empresa:
+        return user.perfil.empresa
+    raise PermissionDenied("El usuario no tiene una empresa asignada en el sistema.")
+
+
 class DashboardResumenView(APIView):
-    permission_classes = [IsAuthenticated]  # noqa: RUF012
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        empresa = get_user_empresa(request.user)
         hoy = timezone.localdate()
         tz_actual = timezone.get_current_timezone()
 
-        # Actualización preventiva de préstamos en mora
-        prestamos_a_revisar = Prestamo.objects.filter(estado='activo', activo=True)
+        # Actualización preventiva de préstamos en mora de la empresa
+        prestamos_a_revisar = Prestamo.objects.filter(empresa=empresa, estado='activo', activo=True)
         for p in prestamos_a_revisar:
             if p.cuotas.filter(esta_pagada=False, fecha_vencimiento__lt=hoy).exists():
                 p.estado = 'mora'
                 p.save()
-                
-        # 1. Métricas de Capital
-        pendientes = Cuota.objects.filter(esta_pagada=False).aggregate(
+
+        # 1. Métricas de Capital (empresa actual)
+        pendientes = Cuota.objects.filter(prestamo__empresa=empresa, esta_pagada=False).aggregate(
             cap=Sum('monto_capital'),
             int=Sum('monto_interes')
         )
         capital_en_la_calle = pendientes['cap'] or Decimal('0.00')
         intereses_por_cobrar = pendientes['int'] or Decimal('0.00')
-        
+
         # Préstamos vigentes
-        prestamos_vigentes_qs = Prestamo.objects.filter(activo=True, estado__in=['activo', 'mora'])
+        prestamos_vigentes_qs = Prestamo.objects.filter(empresa=empresa, activo=True, estado__in=['activo', 'mora'])
         prestamos_vigentes_totales = prestamos_vigentes_qs.count()
         prestamos_en_mora = prestamos_vigentes_qs.filter(estado='mora').count()
-        
+
         # 2. Promedio sobre vigentes
         promedio_otorgado = prestamos_vigentes_qs.aggregate(
             prom=Avg('monto_solicitado')
@@ -45,25 +53,28 @@ class DashboardResumenView(APIView):
 
         # 3. Cobranza esperada hoy
         cobranza_hoy_esperada = Cuota.objects.filter(
-            fecha_vencimiento=hoy, 
+            prestamo__empresa=empresa,
+            fecha_vencimiento=hoy,
             esta_pagada=False
         ).aggregate(total=Sum('monto_total'))['total'] or Decimal('0.00')
-        
-        # 4. Caja y Rentabilidad Real
-        saldo_caja = Caja.saldo_actual()
 
-        datos_pagados = Cuota.objects.filter(esta_pagada=True).aggregate(
+        # 4. Caja y Rentabilidad Real de la empresa
+        ingresos_caja = Caja.objects.filter(empresa=empresa, tipo='ingreso').aggregate(total=Sum('monto'))['total'] or Decimal('0.00')
+        egresos_caja = Caja.objects.filter(empresa=empresa, tipo='egreso').aggregate(total=Sum('monto'))['total'] or Decimal('0.00')
+        saldo_caja = ingresos_caja - egresos_caja
+
+        datos_pagados = Cuota.objects.filter(prestamo__empresa=empresa, esta_pagada=True).aggregate(
             int_cobrado=Sum('monto_interes'),
             mora_cobrada=Sum('mora_pagada')
         )
         total_ganancia_real = (datos_pagados['int_cobrado'] or Decimal('0.00')) + (datos_pagados['mora_cobrada'] or Decimal('0.00'))
 
         # 5. Tasa de Mora
-        total_pendientes = Cuota.objects.filter(esta_pagada=False).count()
-        vencidas = Cuota.objects.filter(esta_pagada=False, fecha_vencimiento__lt=hoy).count()
+        total_pendientes = Cuota.objects.filter(prestamo__empresa=empresa, esta_pagada=False).count()
+        vencidas = Cuota.objects.filter(prestamo__empresa=empresa, esta_pagada=False, fecha_vencimiento__lt=hoy).count()
         tasa_mora = (vencidas / total_pendientes * 100) if total_pendientes > 0 else 0
 
-        # 6. Tendencias de Crecimiento (Últimos 6 meses reales)
+        # 6. Tendencias de Crecimiento (Últimos 6 meses)
         MESES_ABR = {
             1: 'Ene', 2: 'Feb', 3: 'Mar', 4: 'Abr', 5: 'May', 6: 'Jun',
             7: 'Jul', 8: 'Ago', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dic'
@@ -80,22 +91,20 @@ class DashboardResumenView(APIView):
 
             _, ultimo_dia = calendar.monthrange(año_target, mes_target)
 
-            # Rango Date para Cuota (DateField)
-            inicio_mes_d = datetime(año_target, mes_target, 1).date()  # noqa: DTZ001
-            fin_mes_d = datetime(año_target, mes_target, ultimo_dia).date() # noqa: DTZ001
+            inicio_mes_d = datetime(año_target, mes_target, 1).date() # noqa: DTZ001
+            fin_mes_d = datetime(año_target, mes_target, ultimo_dia).date()  # noqa: DTZ001
 
-            # Rango DateTime con zona horaria para Caja (DateTimeField)
             inicio_mes_dt = timezone.make_aware(datetime(año_target, mes_target, 1, 0, 0, 0), tz_actual) # noqa: DTZ001
             fin_mes_dt = timezone.make_aware(datetime(año_target, mes_target, ultimo_dia, 23, 59, 59), tz_actual) # noqa: DTZ001
 
-            # Cobros registrados en Cuotas
             total_cuotas = Cuota.objects.filter(
+                prestamo__empresa=empresa,
                 esta_pagada=True,
                 fecha_pago_real__range=(inicio_mes_d, fin_mes_d)
             ).aggregate(total=Sum('monto_total'))['total'] or Decimal('0.00')
 
-            # Cobros registrados como ingresos en Caja
             total_caja = Caja.objects.filter(
+                empresa=empresa,
                 tipo='ingreso',
                 fecha__range=(inicio_mes_dt, fin_mes_dt)
             ).aggregate(total=Sum('monto'))['total'] or Decimal('0.00')
@@ -122,7 +131,7 @@ class DashboardResumenView(APIView):
             },
             "operativo_hoy": {
                 "cobros_pendientes_hoy": float(cobranza_hoy_esperada),
-                "clientes_total": Cliente.objects.filter(activo=True).count()
+                "clientes_total": Cliente.objects.filter(empresa=empresa, activo=True).count()
             },
             "tendencias_crecimiento": tendencias_crecimiento,
             "ultima_actualizacion": timezone.localtime().strftime('%H:%M:%S')

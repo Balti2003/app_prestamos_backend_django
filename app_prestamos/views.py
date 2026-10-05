@@ -2,11 +2,13 @@ from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Sum
 from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, parsers, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -37,40 +39,51 @@ from .serializers import (
 from .utils import generar_pdf_desembolso_seguro, generar_recibo_pago_pdf
 
 
+def get_user_empresa(user):
+    """Retorna la empresa asociada al usuario autenticado"""
+    if hasattr(user, 'perfil') and user.perfil.empresa:
+        return user.perfil.empresa
+    raise PermissionDenied("El usuario no tiene una empresa asignada en el sistema.")
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def usuario_actual(request):
-    """Devuelve los datos del usuario logueado con su rol"""
     serializer = UserSerializer(request.user)
     return Response(serializer.data)
 
 
 class ClienteViewSet(viewsets.ModelViewSet):
-    queryset = Cliente.objects.filter(activo=True).order_by('-id')
-    filter_backends = [filters.SearchFilter]  # noqa: RUF012
-    search_fields = ['nombre', 'apellido', 'dni']  # noqa: RUF012
+    queryset = Cliente.objects.all()
+    permission_classes = [IsAuthenticated]
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['nombre', 'apellido', 'dni']
+
+    def get_queryset(self):
+        empresa = get_user_empresa(self.request.user)
+        return Cliente.objects.filter(empresa=empresa, activo=True).order_by('-id')
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
             return ClientePerfilSerializer
         return ClienteSerializer
 
+    def perform_create(self, serializer):
+        empresa = get_user_empresa(self.request.user)
+        serializer.save(empresa=empresa)
+
     def destroy(self, request, *args, **kwargs):
         cliente = self.get_object()
-        
-        # Validación de seguridad: No eliminar si tiene préstamos activos
         prestamos_activos = cliente.prestamos.filter(estado__in=['activo', 'mora'])
         if prestamos_activos.exists():
             return Response(
                 {"error": "No se puede eliminar el cliente porque tiene préstamos activos o en mora."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-            
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=False, methods=['get'], pagination_class=None)
     def todos(self, request):
-        """Retorna el listado completo sin paginar para selectores en modales"""
         clientes = self.filter_queryset(self.get_queryset())
         serializer = ClienteResumenSerializer(clientes, many=True)
         return Response(serializer.data)
@@ -79,34 +92,34 @@ class ClienteViewSet(viewsets.ModelViewSet):
     def cuotas_cobrables(self, request, pk=None):
         cliente = self.get_object()
         prestamos = cliente.prestamos.filter(estado__in=['activo', 'mora'], activo=True)
-        
+
         proximas_cuotas = []
         hoy = timezone.localdate()
 
         for p in prestamos:
             cuotas_pendientes = p.cuotas.filter(esta_pagada=False).order_by('numero_cuota')
-            
+
             for cuota in cuotas_pendientes:
                 monto_total = Decimal(str(getattr(cuota, 'monto_total', Decimal('0.00')) or '0.00'))
                 monto_pagado = Decimal(str(getattr(cuota, 'monto_pagado', Decimal('0.00')) or '0.00'))
-                
+
                 if hasattr(cuota, 'saldo_pendiente') and cuota.saldo_pendiente is not None:
                     saldo_capital = Decimal(str(cuota.saldo_pendiente))
                 else:
                     saldo_capital = max(Decimal('0.00'), monto_total - monto_pagado)
-                
+
                 mora_acumulada = Decimal('0.00')
                 dias_atraso = 0
 
                 if cuota.fecha_vencimiento and cuota.fecha_vencimiento < hoy:
                     dias_atraso = (hoy - cuota.fecha_vencimiento).days
-                    
+
                     if hasattr(cuota, 'calcular_mora'):
                         mora_calc = Decimal(str(cuota.calcular_mora() or '0.00'))
                         mora_pagada = Decimal(str(getattr(cuota, 'mora_pagada', Decimal('0.00')) or '0.00'))
                         mora_acumulada = max(Decimal('0.00'), mora_calc - mora_pagada)
                     else:
-                        tasa_diaria = Decimal('0.01') 
+                        tasa_diaria = Decimal('0.01')
                         mora_acumulada = monto_total * tasa_diaria * Decimal(str(dias_atraso))
 
                 monto_total_cobrable = saldo_capital + mora_acumulada
@@ -124,17 +137,19 @@ class ClienteViewSet(viewsets.ModelViewSet):
                     "fecha_vencimiento": cuota.fecha_vencimiento,
                     "prestamo_nombre": f"Préstamo #{p.id}"
                 })
-        
+
         return Response(proximas_cuotas)
 
 
 class GarantiaClienteViewSet(viewsets.ModelViewSet):
     queryset = GarantiaCliente.objects.all()
+    permission_classes = [IsAuthenticated]
     serializer_class = GarantiaClienteSerializer
     parser_classes = (parsers.MultiPartParser, parsers.FormParser)
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        empresa = get_user_empresa(self.request.user)
+        queryset = GarantiaCliente.objects.filter(cliente__empresa=empresa)
         cliente_id = self.request.query_params.get('cliente')
         if cliente_id:
             queryset = queryset.filter(cliente_id=cliente_id)
@@ -142,12 +157,17 @@ class GarantiaClienteViewSet(viewsets.ModelViewSet):
 
 
 class PrestamoViewSet(viewsets.ModelViewSet):
-    queryset = Prestamo.objects.filter(activo=True).order_by('-id')
+    queryset = Prestamo.objects.all()
+    permission_classes = [IsAuthenticated]
     serializer_class = PrestamoSerializer
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]  # noqa: RUF012
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_class = PrestamoFilter
-    search_fields = ['cliente__nombre', 'cliente__apellido', 'cliente__dni']  # noqa: RUF012
-    ordering_fields = ['fecha_inicio', 'monto_solicitado']  # noqa: RUF012
+    search_fields = ['cliente__nombre', 'cliente__apellido', 'cliente__dni']
+    ordering_fields = ['fecha_inicio', 'monto_solicitado']
+
+    def get_queryset(self):
+        empresa = get_user_empresa(self.request.user)
+        return Prestamo.objects.filter(empresa=empresa, activo=True).order_by('-id')
 
     def destroy(self, request, *args, **kwargs):
         prestamo = self.get_object()
@@ -156,31 +176,33 @@ class PrestamoViewSet(viewsets.ModelViewSet):
             return super().destroy(request, *args, **kwargs)
 
     def create(self, request, *args, **kwargs):
+        empresa = get_user_empresa(request.user)
         data = request.data.copy()
-        
+
         if not data.get('fecha_inicio'):
             data['fecha_inicio'] = timezone.now()
-        
+
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
 
         monto_solicitado = Decimal(str(serializer.validated_data['monto_solicitado']))
 
-        # ⚡ PROTECCIÓN ATÓMICA EN DESEMBOLSO
         with transaction.atomic():
-            saldo_disponible = Decimal(str(Caja.saldo_actual()))
+            ingresos = Caja.objects.filter(empresa=empresa, tipo='ingreso').aggregate(total=Sum('monto'))['total'] or Decimal('0.00')
+            egresos = Caja.objects.filter(empresa=empresa, tipo='egreso').aggregate(total=Sum('monto'))['total'] or Decimal('0.00')
+            saldo_disponible = Decimal(str(ingresos - egresos))
 
             if saldo_disponible < monto_solicitado:
                 return Response(
                     {
-                        "error": "Fondos insuficientes en caja para entregar el préstamo.",
+                        "error": "Fondos insuficientes en la caja de su empresa para entregar el préstamo.",
                         "saldo_actual": float(saldo_disponible),
                         "monto_requerido": float(monto_solicitado)
-                    }, 
+                    },
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            prestamo = serializer.save()
+            prestamo = serializer.save(empresa=empresa)
             prestamo.generar_plan_pagos()
 
         headers = self.get_success_headers(serializer.data)
@@ -191,22 +213,16 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         try:
             prestamo = self.get_object()
             operador = f"{request.user.first_name} {request.user.last_name}".strip() or request.user.username
-            
             pdf_buffer = generar_pdf_desembolso_seguro(prestamo, operador_nombre=operador)
-            
             response = HttpResponse(pdf_buffer.read(), content_type='application/pdf')
             response['Content-Disposition'] = f'inline; filename="Comprobante_Desembolso_{prestamo.id}.pdf"'
             return response
-        except Exception as e:  # noqa: BLE001
-            print(f"Error interno al generar PDF de desembolso: {e}")
+        except Exception as e:
             return HttpResponse(f"Error al generar PDF: {e!s}", status=500)
 
     @action(detail=True, methods=['post'], url_path='registrar-pago')
     def registrar_pago(self, request, pk=None):
-        """
-        Cobro en cascada atómico y protegido contra concurrencia:
-        Bloquea el préstamo y sus cuotas para evitar condiciones de carrera (doble imputación).
-        """
+        empresa = get_user_empresa(request.user)
         monto_raw = request.data.get('monto')
         metodo_pago_raw = request.data.get('metodo_pago', 'efectivo')
         metodo_pago_detalle = str(request.data.get('metodo_pago_detalle', '')).strip()
@@ -215,7 +231,7 @@ class PrestamoViewSet(viewsets.ModelViewSet):
             metodo_pago_final = metodo_pago_detalle
         else:
             metodo_pago_final = metodo_pago_raw
-        
+
         if monto_raw is None or monto_raw == "":
             return Response({"error": "Debe proporcionar el monto del pago."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -227,9 +243,8 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         except (InvalidOperation, ValueError, TypeError):
             return Response({"error": f"Formato de monto inválido: {monto_raw}"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ⚡ PROTECCIÓN ATÓMICA CON BLOQUEO EXCLUSIVO DE FILAS
         with transaction.atomic():
-            prestamo = Prestamo.objects.select_for_update().get(pk=pk)
+            prestamo = Prestamo.objects.select_for_update().get(pk=pk, empresa=empresa)
             cuotas_pendientes = list(
                 prestamo.cuotas.select_for_update().filter(esta_pagada=False).order_by('numero_cuota')
             )
@@ -248,13 +263,11 @@ class PrestamoViewSet(viewsets.ModelViewSet):
                 mora_abonada = Decimal('0.00')
                 capital_abonado = Decimal('0.00')
 
-                # A. Cobrar mora si existe
                 if mora_cuota > 0:
                     mora_abonada = min(monto_disponible, mora_cuota)
                     cuota.mora_pagada += mora_abonada
                     monto_disponible -= mora_abonada
 
-                # B. Cobrar capital/cuota si aún queda dinero
                 if monto_disponible > 0:
                     falta = cuota.saldo_pendiente
                     capital_abonado = min(monto_disponible, falta)
@@ -286,6 +299,7 @@ class PrestamoViewSet(viewsets.ModelViewSet):
                 cuota_impactada_id = desglose[0]["cuota_id"] if desglose else None
 
                 Caja.objects.create(
+                    empresa=empresa,
                     tipo='ingreso',
                     monto=monto_aplicado,
                     concepto=concepto,
@@ -314,13 +328,14 @@ class PrestamoViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def sincronizar_mora(self, request):
-        prestamos_activos = Prestamo.objects.filter(estado__in=['activo', 'mora'])
+        empresa = get_user_empresa(request.user)
+        prestamos_activos = Prestamo.objects.filter(empresa=empresa, estado__in=['activo', 'mora'])
         actualizados = 0
-            
+
         for p in prestamos_activos:
             if hasattr(p, 'actualizar_estado_mora') and p.actualizar_estado_mora():
                 actualizados += 1
-                    
+
         return Response({
             "message": f"Sincronización completada. {actualizados} préstamos cambiaron de estado."
         })
@@ -328,21 +343,26 @@ class PrestamoViewSet(viewsets.ModelViewSet):
 
 class CuotaViewSet(viewsets.ModelViewSet):
     queryset = Cuota.objects.all()
+    permission_classes = [IsAuthenticated]
     serializer_class = CuotaSerializer
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]  # noqa: RUF012
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_class = CuotaFilter
-    ordering_fields = ['fecha_vencimiento', 'numero_cuota']  # noqa: RUF012
+    ordering_fields = ['fecha_vencimiento', 'numero_cuota']
+
+    def get_queryset(self):
+        empresa = get_user_empresa(self.request.user)
+        return Cuota.objects.filter(prestamo__empresa=empresa)
 
     @action(detail=True, methods=['post'])
     def registrar_pago(self, request, pk=None):
+        empresa = get_user_empresa(request.user)
         try:
             with transaction.atomic():
-                # Bloqueo a nivel de fila para evitar cobros dobles concurrentes
-                cuota_actual = Cuota.objects.select_for_update().get(pk=pk)
-                
+                cuota_actual = Cuota.objects.select_for_update().get(pk=pk, prestamo__empresa=empresa)
+
                 if cuota_actual.esta_pagada:
                     return Response(
-                        {'error': 'Esta cuota ya fue pagada anteriormente.'}, 
+                        {'error': 'Esta cuota ya fue pagada anteriormente.'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
@@ -357,16 +377,12 @@ class CuotaViewSet(viewsets.ModelViewSet):
                         {
                             'error': 'No se puede cobrar esta cuota. El cliente debe pagar las cuotas anteriores primero.',
                             'detalle': f'Existen cuotas previas a la #{cuota_actual.numero_cuota} pendientes de pago.'
-                        }, 
+                        },
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
                 usuario_obj = request.user
-                if usuario_obj.is_authenticated:
-                    nombre_operador = f"{usuario_obj.first_name} {usuario_obj.last_name}".strip()
-                    operador = nombre_operador if nombre_operador else usuario_obj.username
-                else:
-                    operador = "Sistema (Token no detectado)"
+                operador = usuario_obj.get_full_name() or usuario_obj.username
 
                 cuota_actual.esta_pagada = True
                 cuota_actual.fecha_pago_real = timezone.localdate()
@@ -383,30 +399,29 @@ class CuotaViewSet(viewsets.ModelViewSet):
                 return Response({'status': 'Pago registrado con éxito'}, status=status.HTTP_200_OK)
         except Cuota.DoesNotExist:
             return Response({'error': 'Cuota no encontrada'}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['get'])
     def generar_recibo(self, request, pk=None):
         cuota = self.get_object()
-        
+
         monto_pagado = getattr(cuota, 'monto_pagado', Decimal('0.00'))
         mora_pagada = getattr(cuota, 'mora_pagada', Decimal('0.00'))
-        
+
         if monto_pagado <= 0 and mora_pagada <= 0 and not cuota.esta_pagada:
             return Response(
-                {'error': 'No se puede generar recibo de una cuota que no registra ningún pago.'}, 
+                {'error': 'No se puede generar recibo de una cuota que no registra ningún pago.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         cobrador = request.user.get_full_name() or request.user.username if request.user and request.user.is_authenticated else "Sistema"
-        
         buffer = generar_recibo_pago_pdf(cuota, cobrador_nombre=cobrador)
-        
+
         filename = f"Recibo_P#{cuota.prestamo.id}_C#{cuota.numero_cuota}.pdf"
         return HttpResponse(
-            buffer, 
-            content_type='application/pdf', 
+            buffer,
+            content_type='application/pdf',
             headers={'Content-Disposition': f'attachment; filename="{filename}"'}
         )
 
@@ -414,39 +429,38 @@ class CuotaViewSet(viewsets.ModelViewSet):
 class CajaViewSet(viewsets.ModelViewSet):
     queryset = Caja.objects.all()
     serializer_class = CajaSerializer
-    permission_classes = [IsAuthenticated]  # noqa: RUF012
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]  # noqa: RUF012
-    filterset_class = CajaFilter  
-    search_fields = ['concepto']  # noqa: RUF012
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_class = CajaFilter
+    search_fields = ['concepto']
 
     def get_queryset(self):
         user = self.request.user
-
         if not user.is_authenticated:
             return Caja.objects.none()
 
+        empresa = get_user_empresa(user)
         if user.is_staff or (hasattr(user, 'permisos_custom') and user.permisos_custom.puede_ver_caja):
-            return Caja.objects.all().order_by('-fecha', '-id')
+            return Caja.objects.filter(empresa=empresa).order_by('-fecha', '-id')
 
         return Caja.objects.none()
 
+    def perform_create(self, serializer):
+        empresa = get_user_empresa(self.request.user)
+        serializer.save(empresa=empresa)
+
 
 class CambiarPasswordView(APIView):
-    permission_classes = [IsAuthenticated]  # noqa: RUF012
+    permission_classes = [IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
         serializer = CambiarPasswordSerializer(data=request.data, context={'request': request})
-        
         if serializer.is_valid():
             user = request.user
             user.set_password(serializer.validated_data['new_password'])
             user.save()
-            
-            return Response(
-                {"message": "Contraseña actualizada correctamente."}, 
-                status=status.HTTP_200_OK
-            )
-            
+            return Response({"message": "Contraseña actualizada correctamente."}, status=status.HTTP_200_OK)
+
         error_msg = next(iter(serializer.errors.values()))[0]
         return Response({"error": error_msg}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -454,16 +468,22 @@ class CambiarPasswordView(APIView):
 class CajaDiariaViewSet(viewsets.ModelViewSet):
     queryset = CajaDiaria.objects.all()
     serializer_class = CajaDiariaSerializer
-    permission_classes = [IsAuthenticated]  # noqa: RUF012
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        empresa = get_user_empresa(self.request.user)
+        return CajaDiaria.objects.filter(empresa=empresa)
 
     @action(detail=False, methods=['get'])
     def estado_actual(self, request):
-        caja_abierta = CajaDiaria.objects.filter(estado='ABIERTA').first()
+        empresa = get_user_empresa(request.user)
+        caja_abierta = CajaDiaria.objects.filter(empresa=empresa, estado='ABIERTA').first()
+
         if caja_abierta:
             ingresos = sum(mov.monto for mov in caja_abierta.movimientos.filter(tipo='ingreso'))
             egresos = sum(mov.monto for mov in caja_abierta.movimientos.filter(tipo='egreso'))
             estimado = caja_abierta.saldo_apertura + ingresos - egresos
-            
+
             return Response({
                 'caja_abierta': True,
                 'id': caja_abierta.id,
@@ -474,10 +494,10 @@ class CajaDiariaViewSet(viewsets.ModelViewSet):
                 'saldo_estimado': estimado,
                 'operador_apertura': caja_abierta.operador_apertura.username
             })
-        
-        ultima_caja = CajaDiaria.objects.filter(estado='CERRADA').order_by('-id').first()
-        saldo_sugerido = ultima_caja.saldo_real_fisico if ultima_caja else 0.00
-        
+
+        ultima_caja = CajaDiaria.objects.filter(empresa=empresa, estado='CERRADA').order_by('-id').first()
+        saldo_sugerido = ultima_caja.saldo_real_fisico if ultima_caja else Decimal('0.00')
+
         return Response({
             'caja_abierta': False,
             'saldo_sugerido': saldo_sugerido
@@ -485,18 +505,20 @@ class CajaDiariaViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def abrir_caja(self, request):
+        empresa = get_user_empresa(request.user)
         saldo_inicial = request.data.get('saldo_apertura', 0.00)
-        
+
         try:
             with transaction.atomic():
                 nueva_caja = CajaDiaria(
+                    empresa=empresa,
                     operador_apertura=request.user,
                     saldo_apertura=saldo_inicial,
                     estado='ABIERTA'
                 )
                 nueva_caja.full_clean()
                 nueva_caja.save()
-                
+
                 serializer = self.get_serializer(nueva_caja)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
         except ValidationError as e:
@@ -504,6 +526,7 @@ class CajaDiariaViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def cerrar_caja(self, request, pk=None):
+        empresa = get_user_empresa(request.user)
         saldo_fisico = request.data.get('saldo_real_fisico')
         observaciones = request.data.get('observaciones', '')
 
@@ -512,21 +535,21 @@ class CajaDiariaViewSet(viewsets.ModelViewSet):
 
         try:
             with transaction.atomic():
-                caja = CajaDiaria.objects.select_for_update().get(pk=pk)
+                caja = CajaDiaria.objects.select_for_update().get(pk=pk, empresa=empresa)
 
                 if caja.estado == 'CERRADA':
                     return Response({'error': 'Esta caja ya se encuentra cerrada.'}, status=status.HTTP_400_BAD_REQUEST)
 
                 ingresos = sum(mov.monto for mov in caja.movimientos.filter(tipo='ingreso'))
                 egresos = sum(mov.monto for mov in caja.movimientos.filter(tipo='egreso'))
-                
+
                 caja.ingresos_sistema = ingresos
                 caja.egresos_sistema = egresos
                 caja.saldo_estimado = caja.saldo_apertura + ingresos - egresos
-                
+
                 caja.saldo_real_fisico = Decimal(str(saldo_fisico))
                 caja.diferencia = caja.saldo_real_fisico - caja.saldo_estimado
-                
+
                 caja.observaciones = observaciones
                 caja.operador_cierre = request.user
                 caja.fecha_cierre = timezone.now()
@@ -537,15 +560,16 @@ class CajaDiariaViewSet(viewsets.ModelViewSet):
                 return Response(serializer.data, status=status.HTTP_200_OK)
         except CajaDiaria.DoesNotExist:
             return Response({'error': 'Caja diaria no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class CrearOperadorView(APIView):
-    permission_classes = [IsAdminUser]  # noqa: RUF012
+    permission_classes = [IsAdminUser]
 
     def post(self, request):
-        serializer = CrearOperadorSerializer(data=request.data)
+        empresa = get_user_empresa(request.user)
+        serializer = CrearOperadorSerializer(data=request.data, context={'empresa': empresa})
         if serializer.is_valid():
             user = serializer.save()
             return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)

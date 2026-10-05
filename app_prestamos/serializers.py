@@ -1,8 +1,10 @@
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
+from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from .models import (
     Caja,
@@ -10,20 +12,17 @@ from .models import (
     Cliente,
     Cuota,
     GarantiaCliente,
+    PerfilUsuario,
     PermisosOperador,
     Prestamo,
 )
 
 DIAS_SEMANA = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 
+
 def calcular_estado_financiero_cliente(cliente_obj):
-    """
-    Calcula el estado del semáforo, la frecuencia del préstamo activo y
-    las fechas exactas con día de la semana (inicio y próximo vencimiento).
-    """
     hoy = timezone.localdate()
     
-    # Obtenemos las cuotas impagas del préstamo activo ordenadas por vencimiento
     cuotas_pendientes = Cuota.objects.filter(
         prestamo__cliente=cliente_obj,
         prestamo__activo=True,
@@ -46,14 +45,12 @@ def calcular_estado_financiero_cliente(cliente_obj):
     fecha_ini = prestamo.fecha_inicio
     dias_diferencia = (fecha_venc - hoy).days
 
-    # Formateo con día de la semana en español (Ej: "Martes 08/09")
     dia_venc_nombre = DIAS_SEMANA[fecha_venc.weekday()]
     vencimiento_formateado = f"{dia_venc_nombre} {fecha_venc.strftime('%d/%m')}"
 
     dia_ini_nombre = DIAS_SEMANA[fecha_ini.weekday()] if fecha_ini else None
     inicio_formateado = f"{dia_ini_nombre} {fecha_ini.strftime('%d/%m')}" if fecha_ini else None
 
-    # Determinamos el estado del semáforo con los textos limpios
     if dias_diferencia < 0:
         dias_abs = abs(dias_diferencia)
         estado = 'moroso'
@@ -74,7 +71,7 @@ def calcular_estado_financiero_cliente(cliente_obj):
         'estado': estado,
         'label': label,
         'dias_restantes': dias_diferencia,
-        'frecuencia': prestamo.frecuencia,  # 'diario', 'semanal', 'quincenal', 'mensual'
+        'frecuencia': prestamo.frecuencia,
         'proximo_vencimiento_texto': vencimiento_formateado,
         'fecha_inicio_texto': inicio_formateado,
         'numero_cuota_pendiente': primera_cuota.numero_cuota,
@@ -90,21 +87,23 @@ class ClienteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Cliente
         fields = [  # noqa: RUF012
-            'id', 
-            'nombre', 
-            'apellido', 
-            'dni', 
-            'telefono', 
-            'direccion', 
-            'tiene_mora', 
-            'estado_financiero', 
-            'prestamos_activos'
+            'id',
+            'nombre',
+            'apellido',
+            'dni',
+            'telefono',
+            'direccion',
+            'tiene_mora',
+            'estado_financiero',
+            'prestamos_activos',
+            'empresa'
         ]
+        read_only_fields = ('empresa', 'creado_el')
 
     def get_tiene_mora(self, obj):
         return obj.prestamos.filter(
             activo=True,
-            cuotas__esta_pagada=False, 
+            cuotas__esta_pagada=False,
             cuotas__fecha_vencimiento__lt=timezone.localdate()
         ).exists()
 
@@ -148,7 +147,7 @@ class CuotaSerializer(serializers.ModelSerializer):
     class Meta:
         model = Cuota
         fields = '__all__'
-    
+
     def get_mora_actual(self, obj):
         return obj.calcular_mora()
 
@@ -161,17 +160,18 @@ class PrestamoSerializer(serializers.ModelSerializer):
     cantidad_cuotas = serializers.IntegerField(source='cuotas_totales', required=False)
     monto_cuota = serializers.SerializerMethodField()
     metodo_pago_detalle = serializers.CharField(write_only=True, required=False, allow_blank=True)
-    
+
     fecha_inicio = serializers.DateField(
-        format="%Y-%m-%d", 
+        format="%Y-%m-%d",
         input_formats=['%Y-%m-%d', 'iso-8601'],
-        required=False, 
+        required=False,
         allow_null=True
     )
 
     class Meta:
         model = Prestamo
         fields = '__all__'
+        read_only_fields = ('empresa',)
         extra_kwargs = {  # noqa: RUF012
             'cuotas_totales': {'required': False},
             'estado': {'required': False},
@@ -197,7 +197,7 @@ class PrestamoSerializer(serializers.ModelSerializer):
     def get_monto_cuota(self, obj):
         cuota = self._get_cuotas_qs(obj).first()
         return float(cuota.monto_total) if cuota else 0.0
-    
+
     def _get_cuotas_qs(self, obj):
         if hasattr(obj, 'cuotas'):
             return obj.cuotas.all()
@@ -213,7 +213,6 @@ class PrestamoSerializer(serializers.ModelSerializer):
 
 
 class PrestamoMiniSerializer(serializers.ModelSerializer):
-    """Serializer para mostrar deudas dentro del perfil del cliente"""
     cuotas_pagadas = serializers.SerializerMethodField()
     monto_cuota = serializers.SerializerMethodField()
     plan_pagos = CuotaSerializer(source='cuotas', many=True, read_only=True)
@@ -221,11 +220,11 @@ class PrestamoMiniSerializer(serializers.ModelSerializer):
     class Meta:
         model = Prestamo
         fields = [  # noqa: RUF012
-            'id', 
-            'monto_solicitado', 
-            'cuotas_totales', 
-            'cuotas_pagadas', 
-            'monto_cuota', 
+            'id',
+            'monto_solicitado',
+            'cuotas_totales',
+            'cuotas_pagadas',
+            'monto_cuota',
             'estado',
             'metodo_pago',
             'plan_pagos'
@@ -246,8 +245,9 @@ class CajaSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Caja
-        fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada', 'metodo_pago', 'cuota_id', 'prestamo_id']  # noqa: RUF012
-        
+        fields = ['id', 'tipo', 'monto', 'concepto', 'fecha', 'fecha_formateada', 'metodo_pago', 'cuota_id', 'prestamo_id', 'empresa']  # noqa: RUF012
+        read_only_fields = ('empresa', 'caja_diaria')
+
     def get_fecha_formateada(self, obj):
         if obj.fecha:
             fecha_local = timezone.localtime(obj.fecha)
@@ -262,9 +262,8 @@ class CajaSerializer(serializers.ModelSerializer):
 
 
 class HistorialPagosSerializer(serializers.ModelSerializer):
-    """Serializer para listar el historial cronológico de pagos del cliente"""
     prestamo_id = serializers.ReadOnlyField(source='prestamo.id')
-    
+
     class Meta:
         model = Cuota
         fields = ['id', 'prestamo_id', 'numero_cuota', 'monto_total', 'mora_pagada', 'fecha_pago_real', 'metodo_pago']  # noqa: RUF012
@@ -281,7 +280,7 @@ class ClientePerfilSerializer(serializers.ModelSerializer):
     class Meta:
         model = Cliente
         fields = [  # noqa: RUF012
-            'id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion', 
+            'id', 'nombre', 'apellido', 'dni', 'telefono', 'direccion',
             'tiene_mora', 'estado_financiero',
             'prestamos_activos', 'metricas_comportamiento', 'historial_pagos', 'garantias'
         ]
@@ -289,7 +288,7 @@ class ClientePerfilSerializer(serializers.ModelSerializer):
     def get_tiene_mora(self, obj):
         return obj.prestamos.filter(
             activo=True,
-            cuotas__esta_pagada=False, 
+            cuotas__esta_pagada=False,
             cuotas__fecha_vencimiento__lt=timezone.localdate()
         ).exists()
 
@@ -302,7 +301,7 @@ class ClientePerfilSerializer(serializers.ModelSerializer):
 
     def get_metricas_comportamiento(self, obj):
         cuotas_pagadas = Cuota.objects.filter(prestamo__cliente=obj, esta_pagada=True)
-        
+
         total_pagadas = cuotas_pagadas.count()
         pagadas_con_mora = cuotas_pagadas.filter(mora_pagada__gt=0).count()
         pagadas_a_tiempo = total_pagadas - pagadas_con_mora
@@ -326,7 +325,7 @@ class ClientePerfilSerializer(serializers.ModelSerializer):
 
     def get_historial_pagos(self, obj):
         cuotas = Cuota.objects.filter(
-            prestamo__cliente=obj, 
+            prestamo__cliente=obj,
             esta_pagada=True
         ).order_by('-fecha_pago_real')
         return HistorialPagosSerializer(cuotas, many=True).data
@@ -354,11 +353,14 @@ class CajaDiariaSerializer(serializers.ModelSerializer):
     class Meta:
         model = CajaDiaria
         fields = '__all__'
+        read_only_fields = ('empresa', 'operador_apertura')
+
 
 class PermisosOperadorSerializer(serializers.ModelSerializer):
     class Meta:
         model = PermisosOperador
-        exclude = ['id', 'user']  # noqa: RUF012
+        exclude = ['id', 'user']
+
 
 class CrearOperadorSerializer(serializers.Serializer):
     username = serializers.CharField(required=True)
@@ -366,8 +368,7 @@ class CrearOperadorSerializer(serializers.Serializer):
     last_name = serializers.CharField(required=True)
     email = serializers.EmailField(required=False, allow_blank=True)
     password = serializers.CharField(write_only=True, required=True)
-    
-    # Permisos individuales
+
     puede_crear_prestamo = serializers.BooleanField(default=True)
     puede_cobrar_cuota = serializers.BooleanField(default=True)
     puede_crear_cliente = serializers.BooleanField(default=True)
@@ -382,38 +383,56 @@ class CrearOperadorSerializer(serializers.Serializer):
         return value
 
     def create(self, validated_data):
-        # Extraemos los campos de usuario
+        empresa = self.context.get('empresa')
+        if not empresa:
+            raise serializers.ValidationError({"error": "No se puede registrar un operador sin empresa asignada."})
+
         username = validated_data.pop('username')
         password = validated_data.pop('password')
         first_name = validated_data.pop('first_name')
         last_name = validated_data.pop('last_name')
         email = validated_data.pop('email', '')
 
-        # 1. Creamos el usuario operador (is_staff=False)
-        user = User.objects.create_user(
-            username=username,
-            email=email,
-            password=password,
-            first_name=first_name,
-            last_name=last_name,
-            is_staff=False
-        )
+        with transaction.atomic():
+            user = User.objects.create_user(
+                username=username,
+                email=email,
+                password=password,
+                first_name=first_name,
+                last_name=last_name,
+                is_staff=False
+            )
 
-        # 2. Guardamos sus permisos personalizados
-        PermisosOperador.objects.create(user=user, **validated_data)
-        return user
+            PerfilUsuario.objects.create(
+                user=user,
+                empresa=empresa,
+                rol='operador'
+            )
+
+            PermisosOperador.objects.create(user=user, **validated_data)
+            return user
+
 
 class UserSerializer(serializers.ModelSerializer):
     es_admin = serializers.BooleanField(source='is_staff')
     permisos = serializers.SerializerMethodField()
+    empresa = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'es_admin', 'permisos']  # noqa: RUF012
+        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'es_admin', 'permisos', 'empresa']
+
+    def get_empresa(self, obj):
+        if hasattr(obj, 'perfil') and obj.perfil.empresa:
+            return {
+                'id': obj.perfil.empresa.id,
+                'nombre': obj.perfil.empresa.nombre,
+                'rol': obj.perfil.rol
+            }
+        return None
 
     def get_permisos(self, obj):
         if obj.is_staff:
-            # El administrador tiene todos los permisos activos por defecto
             return {
                 'puede_crear_prestamo': True,
                 'puede_cobrar_cuota': True,
@@ -423,7 +442,36 @@ class UserSerializer(serializers.ModelSerializer):
                 'puede_ver_caja': True,
                 'puede_ver_metricas': True,
             }
-        
-        # Si es operador, buscamos sus permisos o creamos unos por defecto
+
         permisos_obj, _ = PermisosOperador.objects.get_or_create(user=obj)
         return PermisosOperadorSerializer(permisos_obj).data
+
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        token['username'] = user.username
+        if hasattr(user, 'perfil') and user.perfil.empresa:
+            token['empresa_id'] = user.perfil.empresa.id
+            token['empresa_nombre'] = user.perfil.empresa.nombre
+            token['rol'] = user.perfil.rol
+        return token
+
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        data['user'] = {
+            'id': self.user.id,
+            'username': self.user.username,
+            'first_name': self.user.first_name,
+            'last_name': self.user.last_name,
+            'es_admin': self.user.is_staff,
+        }
+        if hasattr(self.user, 'perfil') and self.user.perfil.empresa:
+            data['empresa'] = {
+                'id': self.user.perfil.empresa.id,
+                'nombre': self.user.perfil.empresa.nombre,
+                'rol': self.user.perfil.rol,
+            }
+        else:
+            data['empresa'] = None
+        return data
