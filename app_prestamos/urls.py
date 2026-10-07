@@ -11,6 +11,7 @@ from .views import (
     CuotaViewSet,
     GarantiaClienteViewSet,
     PrestamoViewSet,
+    RegistroEmpresaView,
     usuario_actual,
 )
 
@@ -30,4 +31,5 @@ urlpatterns = [
     path('dashboard/resumen/', DashboardResumenView.as_view(), name='dashboard-resumen'),
     path('usuario/cambiar-password/', CambiarPasswordView.as_view(), name='cambiar-password'),
     path('crear-operador/', CrearOperadorView.as_view(), name='crear_operador'),
+    path('registro-empresa/', RegistroEmpresaView.as_view(), name='registro_empresa'),
 ]

@@ -1,5 +1,6 @@
 from decimal import Decimal, InvalidOperation
 
+from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Sum
@@ -9,7 +10,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, parsers, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import PermissionDenied
-from rest_framework.permissions import IsAdminUser, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -19,8 +20,10 @@ from .models import (
     CajaDiaria,
     Cliente,
     Cuota,
+    Empresa,
     GarantiaCliente,
     HistorialCuota,
+    PerfilUsuario,
     Prestamo,
 )
 from .serializers import (
@@ -55,9 +58,9 @@ def usuario_actual(request):
 
 class ClienteViewSet(viewsets.ModelViewSet):
     queryset = Cliente.objects.all()
-    permission_classes = [IsAuthenticated]
-    filter_backends = [filters.SearchFilter]
-    search_fields = ['nombre', 'apellido', 'dni']
+    permission_classes = [IsAuthenticated]  # noqa: RUF012
+    filter_backends = [filters.SearchFilter] # noqa: RUF012
+    search_fields = ['nombre', 'apellido', 'dni'] # noqa: RUF012
 
     def get_queryset(self):
         empresa = get_user_empresa(self.request.user)
@@ -143,7 +146,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
 
 class GarantiaClienteViewSet(viewsets.ModelViewSet):
     queryset = GarantiaCliente.objects.all()
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # noqa: RUF012
     serializer_class = GarantiaClienteSerializer
     parser_classes = (parsers.MultiPartParser, parsers.FormParser)
 
@@ -158,12 +161,12 @@ class GarantiaClienteViewSet(viewsets.ModelViewSet):
 
 class PrestamoViewSet(viewsets.ModelViewSet):
     queryset = Prestamo.objects.all()
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # noqa: RUF012
     serializer_class = PrestamoSerializer
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter] # noqa: RUF012
     filterset_class = PrestamoFilter
-    search_fields = ['cliente__nombre', 'cliente__apellido', 'cliente__dni']
-    ordering_fields = ['fecha_inicio', 'monto_solicitado']
+    search_fields = ['cliente__nombre', 'cliente__apellido', 'cliente__dni'] # noqa: RUF012
+    ordering_fields = ['fecha_inicio', 'monto_solicitado'] # noqa: RUF012
 
     def get_queryset(self):
         empresa = get_user_empresa(self.request.user)
@@ -217,7 +220,7 @@ class PrestamoViewSet(viewsets.ModelViewSet):
             response = HttpResponse(pdf_buffer.read(), content_type='application/pdf')
             response['Content-Disposition'] = f'inline; filename="Comprobante_Desembolso_{prestamo.id}.pdf"'
             return response
-        except Exception as e:
+        except Exception as e: 
             return HttpResponse(f"Error al generar PDF: {e!s}", status=500)
 
     @action(detail=True, methods=['post'], url_path='registrar-pago')
@@ -343,11 +346,11 @@ class PrestamoViewSet(viewsets.ModelViewSet):
 
 class CuotaViewSet(viewsets.ModelViewSet):
     queryset = Cuota.objects.all()
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # noqa: RUF012
     serializer_class = CuotaSerializer
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter] # noqa: RUF012
     filterset_class = CuotaFilter
-    ordering_fields = ['fecha_vencimiento', 'numero_cuota']
+    ordering_fields = ['fecha_vencimiento', 'numero_cuota'] # noqa: RUF012
 
     def get_queryset(self):
         empresa = get_user_empresa(self.request.user)
@@ -429,10 +432,10 @@ class CuotaViewSet(viewsets.ModelViewSet):
 class CajaViewSet(viewsets.ModelViewSet):
     queryset = Caja.objects.all()
     serializer_class = CajaSerializer
-    permission_classes = [IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    permission_classes = [IsAuthenticated] # noqa: RUF012
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter] # noqa: RUF012
     filterset_class = CajaFilter
-    search_fields = ['concepto']
+    search_fields = ['concepto'] # noqa: RUF012
 
     def get_queryset(self):
         user = self.request.user
@@ -451,7 +454,7 @@ class CajaViewSet(viewsets.ModelViewSet):
 
 
 class CambiarPasswordView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # noqa: RUF012
 
     def post(self, request, *args, **kwargs):
         serializer = CambiarPasswordSerializer(data=request.data, context={'request': request})
@@ -468,7 +471,7 @@ class CambiarPasswordView(APIView):
 class CajaDiariaViewSet(viewsets.ModelViewSet):
     queryset = CajaDiaria.objects.all()
     serializer_class = CajaDiariaSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated] # noqa: RUF012
 
     def get_queryset(self):
         empresa = get_user_empresa(self.request.user)
@@ -565,7 +568,15 @@ class CajaDiariaViewSet(viewsets.ModelViewSet):
 
 
 class CrearOperadorView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminUser]  # noqa: RUF012
+
+    def get(self, request):
+        empresa = get_user_empresa(request.user)
+        # Obtenemos todos los perfiles de la empresa excluyendo al usuario que hace la petición (admin)
+        perfiles = PerfilUsuario.objects.filter(empresa=empresa).exclude(user=request.user).select_related('user')
+        usuarios = [p.user for p in perfiles]
+        serializer = UserSerializer(usuarios, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
         empresa = get_user_empresa(request.user)
@@ -574,3 +585,70 @@ class CrearOperadorView(APIView):
             user = serializer.save()
             return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class RegistroEmpresaView(APIView):
+    permission_classes = [AllowAny]  # noqa: RUF012
+
+    def post(self, request):
+        data = request.data
+        nombre_empresa = data.get('nombre_empresa', '').strip()
+        cuit_rut = data.get('cuit_rut', '').strip()
+        username = data.get('username', '').strip()
+        password = data.get('password', '').strip()
+        email = data.get('email', '').strip()
+        first_name = data.get('first_name', '').strip()
+        last_name = data.get('last_name', '').strip()
+
+        if not nombre_empresa or not username or not password:
+            return Response(
+                {'error': 'Nombre de empresa, usuario y contraseña son requeridos.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if User.objects.filter(username=username).exists():
+            return Response(
+                {'error': 'El nombre de usuario ya está en uso. Por favor elige otro.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            with transaction.atomic():
+                # 1. Crear el Tenant / Empresa
+                empresa = Empresa.objects.create(
+                    nombre=nombre_empresa,
+                    cuit_rut=cuit_rut,
+                    activo=True
+                )
+
+                # 2. Crear el Usuario Administrador de la Empresa
+                user = User.objects.create_user(
+                    username=username,
+                    email=email,
+                    password=password,
+                    first_name=first_name,
+                    last_name=last_name,
+                    is_staff=True  # Permiso para administrar su cuenta
+                )
+
+                # 3. Vincular el Perfil con rol Admin
+                PerfilUsuario.objects.create(
+                    user=user,
+                    empresa=empresa,
+                    rol='admin'
+                )
+
+                return Response({
+                    'mensaje': 'Empresa y usuario creados exitosamente.',
+                    'empresa': {
+                        'id': empresa.id,
+                        'nombre': empresa.nombre
+                    },
+                    'username': user.username
+                }, status=status.HTTP_201_CREATED)
+
+        except Exception as e:  # noqa: BLE001
+            return Response(
+                {'error': f'Error interno al crear la cuenta: {str(e)}'},  # noqa: RUF010
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
