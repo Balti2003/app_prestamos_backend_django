@@ -4,6 +4,7 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from .models import (
@@ -447,31 +448,32 @@ class UserSerializer(serializers.ModelSerializer):
         return PermisosOperadorSerializer(permisos_obj).data
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-    @classmethod
-    def get_token(cls, user):
-        token = super().get_token(user)
-        token['username'] = user.username
-        if hasattr(user, 'perfil') and user.perfil.empresa:
-            token['empresa_id'] = user.perfil.empresa.id
-            token['empresa_nombre'] = user.perfil.empresa.nombre
-            token['rol'] = user.perfil.rol
-        return token
+    default_error_messages = {  # noqa: RUF012
+        'no_active_account': 'Usuario o contraseña incorrectos.'
+    }
 
     def validate(self, attrs):
         data = super().validate(attrs)
+
+        # 1. Superusuarios omiten la validación de empresa
+        if not self.user.is_superuser:
+            perfil = getattr(self.user, 'perfil', None)
+            if not perfil or not perfil.empresa:
+                raise AuthenticationFailed("El usuario no tiene una empresa asignada en el sistema.")
+            
+            if not perfil.empresa.activo:
+                raise AuthenticationFailed(
+                    "Tu cuenta está pendiente de activación. El pago de la suscripción no fue completado."
+                )
+
+        # 2. Inyectar datos del usuario en la respuesta JWT
+        perfil = getattr(self.user, 'perfil', None)
         data['user'] = {
             'id': self.user.id,
             'username': self.user.username,
             'first_name': self.user.first_name,
             'last_name': self.user.last_name,
-            'es_admin': self.user.is_staff,
+            'rol': perfil.rol if perfil else 'admin',
+            'empresa': perfil.empresa.nombre if perfil and perfil.empresa else None,
         }
-        if hasattr(self.user, 'perfil') and self.user.perfil.empresa:
-            data['empresa'] = {
-                'id': self.user.perfil.empresa.id,
-                'nombre': self.user.perfil.empresa.nombre,
-                'rol': self.user.perfil.rol,
-            }
-        else:
-            data['empresa'] = None
         return data

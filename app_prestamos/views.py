@@ -1,5 +1,7 @@
+import os
 from decimal import Decimal, InvalidOperation
 
+import mercadopago
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -9,10 +11,12 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, parsers, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .filters import CajaFilter, CuotaFilter, PrestamoFilter
 from .models import (
@@ -43,15 +47,22 @@ from .utils import generar_pdf_desembolso_seguro, generar_recibo_pago_pdf
 
 
 def get_user_empresa(user):
-    """Retorna la empresa asociada al usuario autenticado"""
+    """Retorna la empresa asociada al usuario autenticado y verifica suscripción"""
     if hasattr(user, 'perfil') and user.perfil.empresa:
-        return user.perfil.empresa
+        empresa = user.perfil.empresa
+        # Si es superusuario de Django puede auditar sin restricción
+        if user.is_superuser:
+            return empresa
+        if not empresa.activo:
+            raise PermissionDenied("La suscripción de tu empresa no está activa o el pago está pendiente.")
+        return empresa
     raise PermissionDenied("El usuario no tiene una empresa asignada en el sistema.")
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def usuario_actual(request):
+    get_user_empresa(request.user)  # Bloquea si la empresa tiene activo=False
     serializer = UserSerializer(request.user)
     return Response(serializer.data)
 
@@ -220,7 +231,7 @@ class PrestamoViewSet(viewsets.ModelViewSet):
             response = HttpResponse(pdf_buffer.read(), content_type='application/pdf')
             response['Content-Disposition'] = f'inline; filename="Comprobante_Desembolso_{prestamo.id}.pdf"'
             return response
-        except Exception as e: 
+        except Exception as e:  # noqa: BLE001
             return HttpResponse(f"Error al generar PDF: {e!s}", status=500)
 
     @action(detail=True, methods=['post'], url_path='registrar-pago')
@@ -402,7 +413,7 @@ class CuotaViewSet(viewsets.ModelViewSet):
                 return Response({'status': 'Pago registrado con éxito'}, status=status.HTTP_200_OK)
         except Cuota.DoesNotExist:
             return Response({'error': 'Cuota no encontrada'}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['get'])
@@ -563,7 +574,7 @@ class CajaDiariaViewSet(viewsets.ModelViewSet):
                 return Response(serializer.data, status=status.HTTP_200_OK)
         except CajaDiaria.DoesNotExist:
             return Response({'error': 'Caja diaria no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -599,6 +610,7 @@ class RegistroEmpresaView(APIView):
         email = data.get('email', '').strip()
         first_name = data.get('first_name', '').strip()
         last_name = data.get('last_name', '').strip()
+        plan_id = data.get('plan_id', 'plan_basico')
 
         if not nombre_empresa or not username or not password:
             return Response(
@@ -612,43 +624,126 @@ class RegistroEmpresaView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Precios según plan
+        precio = 29000.0 if plan_id == 'plan_pro' else 15000.0
+        titulo_plan = "PrestaYa - Plan Financiera Pro" if plan_id == 'plan_pro' else "PrestaYa - Plan Independiente"
+
         try:
             with transaction.atomic():
-                # 1. Crear el Tenant / Empresa
+                # 1. Crear Empresa (inactiva hasta que pague)
                 empresa = Empresa.objects.create(
                     nombre=nombre_empresa,
                     cuit_rut=cuit_rut,
-                    activo=True
+                    activo=False,
+                    plan_nombre=plan_id
                 )
 
-                # 2. Crear el Usuario Administrador de la Empresa
+                # 2. Crear Usuario Administrador
                 user = User.objects.create_user(
                     username=username,
                     email=email,
                     password=password,
                     first_name=first_name,
                     last_name=last_name,
-                    is_staff=True  # Permiso para administrar su cuenta
+                    is_staff=True
                 )
 
-                # 3. Vincular el Perfil con rol Admin
+                # 3. Vincular Perfil
                 PerfilUsuario.objects.create(
                     user=user,
                     empresa=empresa,
                     rol='admin'
                 )
 
+                # 4. Generar Preferencia en Mercado Pago
+                access_token = os.environ.get('MERCADOPAGO_ACCESS_TOKEN', '')
+                init_point = None
+
+                if access_token:
+                    sdk = mercadopago.SDK(access_token)
+                    preference_data = {
+                        "items": [
+                            {
+                                "title": titulo_plan,
+                                "quantity": 1,
+                                "unit_price": float(precio),
+                                "currency_id": "ARS"
+                            }
+                        ],
+                        "payer": {
+                            "email": email or "cliente@prestaya-app.com",
+                            "name": first_name or username,
+                            "surname": last_name or ""
+                        },
+                        "notification_url": "https://version-obsessed-pajamas.ngrok-free.dev/api/webhooks/mercadopago/",
+                        "back_urls": {
+                            "success": "https://version-obsessed-pajamas.ngrok-free.dev/login?pago=exitoso",
+                            "failure": "https://version-obsessed-pajamas.ngrok-free.dev/registro?pago=fallido",
+                            "pending": "https://version-obsessed-pajamas.ngrok-free.dev/registro?pago=pendiente"
+                        },
+                        "auto_return": "approved",
+                        "external_reference": f"empresa_{empresa.id}",
+                    }
+                    pref_res = sdk.preference().create(preference_data)
+                    print("--> STATUS PREF MP:", pref_res.get("status"))
+
+                    if pref_res.get("status") in [200, 201]:
+                        res_data = pref_res.get("response", {})
+                        # Si existe sandbox_init_point usa ese; si no, el init_point común
+                        init_point = res_data.get("sandbox_init_point") or res_data.get("init_point")
+                        empresa.mp_preference_id = res_data.get("id")
+                        empresa.save(update_fields=['mp_preference_id'])
+                    else:
+                        print("--> ERROR RESPUESTA MP:", pref_res)
+
                 return Response({
-                    'mensaje': 'Empresa y usuario creados exitosamente.',
-                    'empresa': {
-                        'id': empresa.id,
-                        'nombre': empresa.nombre
-                    },
+                    'mensaje': 'Registro iniciado. Redirigiendo al pago...',
+                    'init_point': init_point,
+                    'empresa_id': empresa.id,
                     'username': user.username
                 }, status=status.HTTP_201_CREATED)
 
         except Exception as e:  # noqa: BLE001
             return Response(
-                {'error': f'Error interno al crear la cuenta: {str(e)}'},  # noqa: RUF010
+                {'error': f'Error en el registro: {str(e)}'},  # noqa: RUF010
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+class MercadoPagoWebhookView(APIView):
+    permission_classes = [AllowAny]  # noqa: RUF012
+    authentication_classes = [] # noqa: RUF012
+
+    def post(self, request):
+        topic = request.GET.get('topic') or request.data.get('type')
+        payment_id = request.GET.get('id') or request.data.get('data', {}).get('id')
+
+        print(f"--> Webhook recibido - Topic: {topic}, ID: {payment_id}")
+
+        if topic == 'payment' and payment_id:
+            access_token = os.environ.get('MERCADOPAGO_ACCESS_TOKEN', '')
+            sdk = mercadopago.SDK(access_token)
+            payment_info = sdk.payment().get(payment_id)
+
+            if payment_info.get("status") == 200:
+                p_data = payment_info["response"]
+                print(f"--> Estado del pago MP: {p_data.get('status')}")
+                if p_data.get("status") == "approved":
+                    external_ref = str(p_data.get("external_reference", ""))
+                    
+                    if external_ref.startswith("empresa_"):
+                        empresa_id = external_ref.split("_")[1]
+                    else:
+                        empresa_id = external_ref
+
+                    try:
+                        emp = Empresa.objects.get(id=empresa_id)
+                        emp.activo = True
+                        emp.mp_payment_id = str(payment_id)
+                        emp.fecha_ultimo_pago = timezone.now()
+                        emp.save()
+                        print(f"--> [ÉXITO] Empresa {emp.nombre} (ID: {emp.id}) activada por Webhook.")
+                    except Empresa.DoesNotExist:
+                        print(f"--> [ERROR] Empresa con ID {empresa_id} no encontrada.")
+
+        return Response(status=status.HTTP_200_OK)
