@@ -360,7 +360,7 @@ class CajaDiariaSerializer(serializers.ModelSerializer):
 class PermisosOperadorSerializer(serializers.ModelSerializer):
     class Meta:
         model = PermisosOperador
-        exclude = ['id', 'user']
+        exclude = ['id', 'user']  # noqa: RUF012
 
 
 class CrearOperadorSerializer(serializers.Serializer):
@@ -421,14 +421,17 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'es_admin', 'permisos', 'empresa']
+        fields = ['id', 'username', 'first_name', 'last_name', 'email', 'es_admin', 'permisos', 'empresa']  # noqa: RUF012
 
     def get_empresa(self, obj):
         if hasattr(obj, 'perfil') and obj.perfil.empresa:
             return {
                 'id': obj.perfil.empresa.id,
                 'nombre': obj.perfil.empresa.nombre,
-                'rol': obj.perfil.rol
+                'rol': obj.perfil.rol,
+                'activo': obj.perfil.empresa.activo,
+                # Exponemos el plan contratado
+                'plan_nombre': obj.perfil.empresa.plan_nombre or 'plan_basico'
             }
         return None
 
@@ -447,6 +450,7 @@ class UserSerializer(serializers.ModelSerializer):
         permisos_obj, _ = PermisosOperador.objects.get_or_create(user=obj)
         return PermisosOperadorSerializer(permisos_obj).data
 
+
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     default_error_messages = {  # noqa: RUF012
         'no_active_account': 'Usuario o contraseña incorrectos.'
@@ -455,7 +459,6 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
         data = super().validate(attrs)
 
-        # 1. Superusuarios omiten la validación de empresa
         if not self.user.is_superuser:
             perfil = getattr(self.user, 'perfil', None)
             if not perfil or not perfil.empresa:
@@ -466,14 +469,17 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                     "Tu cuenta está pendiente de activación. El pago de la suscripción no fue completado."
                 )
 
-        # 2. Inyectar datos del usuario en la respuesta JWT
         perfil = getattr(self.user, 'perfil', None)
+        empresa_obj = perfil.empresa if perfil else None
+
         data['user'] = {
             'id': self.user.id,
             'username': self.user.username,
             'first_name': self.user.first_name,
             'last_name': self.user.last_name,
             'rol': perfil.rol if perfil else 'admin',
-            'empresa': perfil.empresa.nombre if perfil and perfil.empresa else None,
+            'empresa': empresa_obj.nombre if empresa_obj else None,
+            # Inyectamos el plan en la respuesta del login
+            'plan_nombre': empresa_obj.plan_nombre if empresa_obj else 'plan_basico',
         }
         return data

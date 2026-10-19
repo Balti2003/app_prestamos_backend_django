@@ -13,6 +13,7 @@ from .views import (
     CuotaViewSet,
     GarantiaClienteViewSet,
     MercadoPagoWebhookView,
+    MetricasAvanzadasProView,
     PrestamoViewSet,
     RegistroEmpresaView,
     usuario_actual,
@@ -42,4 +43,5 @@ urlpatterns = [
     path('crear-operador/', CrearOperadorView.as_view(), name='crear_operador'),
     path('registro-empresa/', RegistroEmpresaView.as_view(), name='registro_empresa'),
     path('webhooks/mercadopago/', MercadoPagoWebhookView.as_view(), name='webhook_mercadopago'),
+    path('analitica-pro/', MetricasAvanzadasProView.as_view(), name='analitica-pro'),
 ]

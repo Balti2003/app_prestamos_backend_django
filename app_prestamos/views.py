@@ -1,15 +1,16 @@
 import os
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 
 import mercadopago
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Count, Q, Sum
 from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import filters, parsers, status, viewsets
+from rest_framework import filters, parsers, serializers, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
@@ -84,6 +85,15 @@ class ClienteViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         empresa = get_user_empresa(self.request.user)
+        
+        # Restricción: Plan Independiente permite un máximo de 150 clientes activos
+        if empresa.plan_nombre != 'plan_pro':
+            clientes_activos = Cliente.objects.filter(empresa=empresa, activo=True).count()
+            if clientes_activos >= 150:
+                raise serializers.ValidationError(
+                    {"error": "Has alcanzado el límite de 150 clientes activos de tu plan Independiente. Pásate al plan Financiera Pro para clientes ilimitados."}
+                )
+
         serializer.save(empresa=empresa)
 
     def destroy(self, request, *args, **kwargs):
@@ -498,6 +508,9 @@ class CajaDiariaViewSet(viewsets.ModelViewSet):
             egresos = sum(mov.monto for mov in caja_abierta.movimientos.filter(tipo='egreso'))
             estimado = caja_abierta.saldo_apertura + ingresos - egresos
 
+            op = caja_abierta.operador_apertura
+            nombre_operador = f"{op.first_name} {op.last_name}".strip() or op.username
+
             return Response({
                 'caja_abierta': True,
                 'id': caja_abierta.id,
@@ -506,7 +519,7 @@ class CajaDiariaViewSet(viewsets.ModelViewSet):
                 'ingresos_sistema': ingresos,
                 'egresos_sistema': egresos,
                 'saldo_estimado': estimado,
-                'operador_apertura': caja_abierta.operador_apertura.username
+                'operador_apertura': nombre_operador
             })
 
         ultima_caja = CajaDiaria.objects.filter(empresa=empresa, estado='CERRADA').order_by('-id').first()
@@ -583,7 +596,6 @@ class CrearOperadorView(APIView):
 
     def get(self, request):
         empresa = get_user_empresa(request.user)
-        # Obtenemos todos los perfiles de la empresa excluyendo al usuario que hace la petición (admin)
         perfiles = PerfilUsuario.objects.filter(empresa=empresa).exclude(user=request.user).select_related('user')
         usuarios = [p.user for p in perfiles]
         serializer = UserSerializer(usuarios, many=True)
@@ -591,6 +603,16 @@ class CrearOperadorView(APIView):
 
     def post(self, request):
         empresa = get_user_empresa(request.user)
+
+        # Restricción: Solo el plan Financiera Pro admite la creación de operadores
+        if empresa.plan_nombre != 'plan_pro':
+            return Response(
+                {
+                    'error': 'Tu plan Independiente solo admite 1 usuario administrador. Actualiza a Financiera Pro para sumar operadores a tu equipo.'
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         serializer = CrearOperadorSerializer(data=request.data, context={'empresa': empresa})
         if serializer.is_valid():
             user = serializer.save()
@@ -689,7 +711,6 @@ class RegistroEmpresaView(APIView):
 
                     if pref_res.get("status") in [200, 201]:
                         res_data = pref_res.get("response", {})
-                        # Si existe sandbox_init_point usa ese; si no, el init_point común
                         init_point = res_data.get("sandbox_init_point") or res_data.get("init_point")
                         empresa.mp_preference_id = res_data.get("id")
                         empresa.save(update_fields=['mp_preference_id'])
@@ -747,3 +768,71 @@ class MercadoPagoWebhookView(APIView):
                         print(f"--> [ERROR] Empresa con ID {empresa_id} no encontrada.")
 
         return Response(status=status.HTTP_200_OK)
+    
+
+class MetricasAvanzadasProView(APIView):
+    permission_classes = [IsAuthenticated]  # noqa: RUF012
+
+    def get(self, request):
+        empresa = get_user_empresa(request.user)
+
+        # Solo Plan Pro
+        if empresa.plan_nombre != 'plan_pro':
+            return Response(
+                {"error": "El módulo de Métricas y Analítica Avanzada es exclusivo del Plan Financiera Pro."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        hoy = timezone.localdate()
+
+        # Score y Distribución de Riesgo de Cuotas Pendientes
+        cuotas_pendientes = Cuota.objects.filter(prestamo__empresa=empresa, esta_pagada=False)
+        total_pendientes = cuotas_pendientes.count()
+
+        al_dia_count = cuotas_pendientes.filter(fecha_vencimiento__gte=hoy).count()
+        mora_leve_count = cuotas_pendientes.filter(
+            fecha_vencimiento__lt=hoy,
+            fecha_vencimiento__gte=hoy - timedelta(days=15)
+        ).count()
+        mora_critica_count = cuotas_pendientes.filter(
+            fecha_vencimiento__lt=hoy - timedelta(days=15)
+        ).count()
+
+        distribucion_riesgo = {
+            "al_dia": al_dia_count,
+            "mora_temprana": mora_leve_count,
+            "mora_critica": mora_critica_count,
+            "porcentaje_sano": round((al_dia_count / total_pendientes * 100), 1) if total_pendientes > 0 else 100
+        }
+
+        # Flujo Proyectado de Cobranzas a 4 Semanas (Cashflow futuro)
+        proyeccion_semanas = []
+        for i in range(4):
+            inicio_sem = hoy + timedelta(days=i * 7)
+            fin_sem = inicio_sem + timedelta(days=6)
+            total_esperado = cuotas_pendientes.filter(
+                fecha_vencimiento__range=[inicio_sem, fin_sem]
+            ).aggregate(total=Sum('monto_total'))['total'] or Decimal('0.00')
+
+            proyeccion_semanas.append({
+                "semana": f"Semana {i+1} ({inicio_sem.strftime('%d/%m')})",
+                "monto_esperado": float(total_esperado)
+            })
+
+        # Desempeño del Equipo de Operadores (Cobros registrados en caja)
+        movimientos_operadores = (
+            Caja.objects.filter(empresa=empresa, tipo='ingreso')
+            .exclude(concepto__isnull=True)
+            .values('prestamo__operador__username')
+            .annotate(
+                total_cobrado=Sum('monto'),
+                operaciones=Count('id')
+            )
+            .order_by('-total_cobrado')[:5]
+        )
+
+        return Response({
+            "distribucion_riesgo": distribucion_riesgo,
+            "proyeccion_semanas": proyeccion_semanas,
+            "kpis_operadores": list(movimientos_operadores),
+        }, status=status.HTTP_200_OK)
