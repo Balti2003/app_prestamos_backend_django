@@ -769,15 +769,15 @@ class MercadoPagoWebhookView(APIView):
 
         return Response(status=status.HTTP_200_OK)
     
-
+    
 class MetricasAvanzadasProView(APIView):
     permission_classes = [IsAuthenticated]  # noqa: RUF012
 
     def get(self, request):
         empresa = get_user_empresa(request.user)
 
-        # Solo Plan Pro
-        if empresa.plan_nombre != 'plan_pro':
+        # Blindaje por suscripción: Solo Plan Pro
+        if not empresa or empresa.plan_nombre != 'plan_pro':
             return Response(
                 {"error": "El módulo de Métricas y Analítica Avanzada es exclusivo del Plan Financiera Pro."},
                 status=status.HTTP_403_FORBIDDEN
@@ -785,28 +785,49 @@ class MetricasAvanzadasProView(APIView):
 
         hoy = timezone.localdate()
 
-        # Score y Distribución de Riesgo de Cuotas Pendientes
+        # 1. Cuotas Pendientes y Semáforo de Riesgo
         cuotas_pendientes = Cuota.objects.filter(prestamo__empresa=empresa, esta_pagada=False)
         total_pendientes = cuotas_pendientes.count()
 
-        al_dia_count = cuotas_pendientes.filter(fecha_vencimiento__gte=hoy).count()
-        mora_leve_count = cuotas_pendientes.filter(
+        al_dia_qs = cuotas_pendientes.filter(fecha_vencimiento__gte=hoy)
+        mora_leve_qs = cuotas_pendientes.filter(
             fecha_vencimiento__lt=hoy,
             fecha_vencimiento__gte=hoy - timedelta(days=15)
-        ).count()
-        mora_critica_count = cuotas_pendientes.filter(
+        )
+        mora_critica_qs = cuotas_pendientes.filter(
             fecha_vencimiento__lt=hoy - timedelta(days=15)
-        ).count()
+        )
+
+        al_dia_count = al_dia_qs.count()
+        mora_leve_count = mora_leve_qs.count()
+        mora_critica_count = mora_critica_qs.count()
+
+        porcentaje_sano = round((al_dia_count / total_pendientes * 100), 1) if total_pendientes > 0 else 100.0
+        monto_riesgo_critico = mora_critica_qs.aggregate(total=Sum('monto_total'))['total'] or Decimal('0.00')
+
+        # Calificación crediticia de la cartera
+        if porcentaje_sano >= 90:
+            calificacion_cartera = "A+ (Excelente)"
+        elif porcentaje_sano >= 75:
+            calificacion_cartera = "B (Saludable)"
+        elif porcentaje_sano >= 60:
+            calificacion_cartera = "C (Riesgo Moderado)"
+        else:
+            calificacion_cartera = "D (Alerta Crítica)"
 
         distribucion_riesgo = {
             "al_dia": al_dia_count,
             "mora_temprana": mora_leve_count,
             "mora_critica": mora_critica_count,
-            "porcentaje_sano": round((al_dia_count / total_pendientes * 100), 1) if total_pendientes > 0 else 100
+            "porcentaje_sano": porcentaje_sano,
+            "monto_riesgo_critico": float(monto_riesgo_critico),
+            "calificacion": calificacion_cartera
         }
 
-        # Flujo Proyectado de Cobranzas a 4 Semanas (Cashflow futuro)
+        # 2. Proyección de Flujo a 4 Semanas (30 días)
         proyeccion_semanas = []
+        total_proyectado_mes = Decimal('0.00')
+
         for i in range(4):
             inicio_sem = hoy + timedelta(days=i * 7)
             fin_sem = inicio_sem + timedelta(days=6)
@@ -814,16 +835,35 @@ class MetricasAvanzadasProView(APIView):
                 fecha_vencimiento__range=[inicio_sem, fin_sem]
             ).aggregate(total=Sum('monto_total'))['total'] or Decimal('0.00')
 
+            total_proyectado_mes += total_esperado
             proyeccion_semanas.append({
                 "semana": f"Semana {i+1} ({inicio_sem.strftime('%d/%m')})",
                 "monto_esperado": float(total_esperado)
             })
 
-        # Desempeño del Equipo de Operadores (Cobros registrados en caja)
-        movimientos_operadores = (
+        # 3. Distribución de Cartera por Modalidad de Cobro (Préstamos Activos)
+        prestamos_activos = Prestamo.objects.filter(empresa=empresa, estado__in=['activo', 'mora'])
+        total_prestamos_activos = prestamos_activos.count()
+
+        modalidades = (
+            prestamos_activos.values('frecuencia')
+            .annotate(cantidad=Count('id'), capital=Sum('monto_solicitado'))
+            .order_by('-cantidad')
+        )
+        distribucion_modalidades = [
+            {
+                "frecuencia": m['frecuencia'].capitalize(),
+                "cantidad": m['cantidad'],
+                "capital": float(m['capital'] or 0),
+                "porcentaje": round((m['cantidad'] / total_prestamos_activos * 100), 1) if total_prestamos_activos > 0 else 0
+            }
+            for m in modalidades
+        ]
+
+        # 4. Productividad y Cobros del Equipo / Operadores
+        operadores_qs = (
             Caja.objects.filter(empresa=empresa, tipo='ingreso')
-            .exclude(concepto__isnull=True)
-            .values('prestamo__operador__username')
+            .values('caja_diaria__operador_apertura__username', 'caja_diaria__operador_apertura__first_name')
             .annotate(
                 total_cobrado=Sum('monto'),
                 operaciones=Count('id')
@@ -831,8 +871,24 @@ class MetricasAvanzadasProView(APIView):
             .order_by('-total_cobrado')[:5]
         )
 
+        kpis_operadores = []
+        for op in operadores_qs:
+            nombre = op['caja_diaria__operador_apertura__first_name'] or op['caja_diaria__operador_apertura__username'] or 'Operador'
+            kpis_operadores.append({
+                "operador": nombre,
+                "total_cobrado": float(op['total_cobrado'] or 0),
+                "operaciones": op['operaciones']
+            })
+
         return Response({
+            "resumen_superior": {
+                "liquidez_proyectada_mes": float(total_proyectado_mes),
+                "monto_riesgo_critico": float(monto_riesgo_critico),
+                "calificacion": calificacion_cartera,
+                "porcentaje_sano": porcentaje_sano
+            },
             "distribucion_riesgo": distribucion_riesgo,
             "proyeccion_semanas": proyeccion_semanas,
-            "kpis_operadores": list(movimientos_operadores),
+            "modalidades": distribucion_modalidades,
+            "kpis_operadores": kpis_operadores,
         }, status=status.HTTP_200_OK)
