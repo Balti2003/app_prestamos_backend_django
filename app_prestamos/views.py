@@ -6,7 +6,7 @@ import mercadopago
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Sum
 from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -204,7 +204,7 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         data = request.data.copy()
 
         if not data.get('fecha_inicio'):
-            data['fecha_inicio'] = timezone.now()
+            data['fecha_inicio'] = timezone.now().date()
 
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
@@ -212,6 +212,18 @@ class PrestamoViewSet(viewsets.ModelViewSet):
         monto_solicitado = Decimal(str(serializer.validated_data['monto_solicitado']))
 
         with transaction.atomic():
+            # BLOQUEO TRANSACCIONAL: Bloquea la caja diaria para serializar peticiones concurrentes
+            caja_activa = CajaDiaria.objects.select_for_update().filter(
+                empresa=empresa, estado='ABIERTA'
+            ).first()
+
+            if not caja_activa:
+                return Response(
+                    {"error": "No hay una Caja Diaria abierta hoy para registrar el desembolso."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Al estar bloqueada la caja, el cálculo de saldo es 100% seguro y secuencial
             ingresos = Caja.objects.filter(empresa=empresa, tipo='ingreso').aggregate(total=Sum('monto'))['total'] or Decimal('0.00')
             egresos = Caja.objects.filter(empresa=empresa, tipo='egreso').aggregate(total=Sum('monto'))['total'] or Decimal('0.00')
             saldo_disponible = Decimal(str(ingresos - egresos))
@@ -679,6 +691,8 @@ class RegistroEmpresaView(APIView):
 
                 # 4. Generar Preferencia en Mercado Pago
                 access_token = os.environ.get('MERCADOPAGO_ACCESS_TOKEN', '')
+                frontend_url = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
+                backend_url = os.environ.get('BACKEND_URL', 'http://localhost:8000')
                 init_point = None
 
                 if access_token:
@@ -697,11 +711,11 @@ class RegistroEmpresaView(APIView):
                             "name": first_name or username,
                             "surname": last_name or ""
                         },
-                        "notification_url": "https://version-obsessed-pajamas.ngrok-free.dev/api/webhooks/mercadopago/",
+                        "notification_url": f"{backend_url}/api/webhooks/mercadopago/",
                         "back_urls": {
-                            "success": "https://version-obsessed-pajamas.ngrok-free.dev/login?pago=exitoso",
-                            "failure": "https://version-obsessed-pajamas.ngrok-free.dev/registro?pago=fallido",
-                            "pending": "https://version-obsessed-pajamas.ngrok-free.dev/registro?pago=pendiente"
+                            "success": f"{frontend_url}/login?pago=exitoso",
+                            "failure": f"{frontend_url}/registro?pago=fallido",
+                            "pending": f"{frontend_url}/registro?pago=pendiente"
                         },
                         "auto_return": "approved",
                         "external_reference": f"empresa_{empresa.id}",

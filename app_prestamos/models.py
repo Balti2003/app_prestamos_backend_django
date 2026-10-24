@@ -338,7 +338,11 @@ class Caja(models.Model):
     )
 
     def save(self, *args, **kwargs):
-        # Asignación automática de empresa según el préstamo o la cuota
+        # 1. Blindaje contra alteración de cajas históricas
+        if self.caja_diaria and self.caja_diaria.estado == 'CERRADA':
+            raise ValidationError("Acción denegada: La caja diaria asociada ya se encuentra CERRADA. No se pueden alterar sus movimientos.")
+
+        # 2. Asignación automática de empresa según el préstamo o la cuota
         if not self.empresa_id:
             if self.prestamo:
                 self.empresa = self.prestamo.empresa
@@ -347,7 +351,7 @@ class Caja(models.Model):
             elif self.caja_diaria:
                 self.empresa = self.caja_diaria.empresa
 
-        # Valida que exista caja diaria abierta para esta empresa específica
+        # 3. Valida que exista caja diaria abierta para esta empresa específica al crear
         if not self.pk:
             if not self.empresa_id:
                 raise ValidationError("No se puede registrar un movimiento de caja sin empresa asociada.")
@@ -355,7 +359,10 @@ class Caja(models.Model):
             caja_activa = CajaDiaria.objects.filter(empresa=self.empresa, estado='ABIERTA').first()
             if not caja_activa:
                 raise ValidationError(f"No hay ninguna Caja Diaria abierta hoy para {self.empresa.nombre}.")
-            self.caja_diaria = caja_activa
+            
+            # Solo asigna la caja activa si no se forzó una históricamente (útil para scripts)
+            if not self.caja_diaria:
+                self.caja_diaria = caja_activa
 
         super().save(*args, **kwargs)
 

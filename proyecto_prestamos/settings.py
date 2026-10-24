@@ -10,24 +10,14 @@ load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-fallback-default-key')
 
-# Se convierte en False si DEBUG='False' en el .env
-DEBUG = os.environ.get('DEBUG', 'False').lower() in ['true', '1', 'yes']
+# Toma la variable de entorno, si no existe asume 'False' por seguridad.
+DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
-# Permite múltiples hosts separados por coma en el .env
-allowed_hosts_env = os.environ.get('ALLOWED_HOSTS', '')
-parsed_hosts = [host.strip() for host in allowed_hosts_env.split(',') if host.strip()]
-
-# Combina los del entorno con los obligatorios para desarrollo/ngrok
-ALLOWED_HOSTS = list(set(parsed_hosts + [
-    'localhost',
-    '127.0.0.1',
-    'backend',
-    '.ngrok-free.app',
-    '.ngrok-free.dev',
-]))
+# Los dominios permitidos se pasan separados por coma en el .env
+allowed_hosts_env = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1')
+ALLOWED_HOSTS = [host.strip() for host in allowed_hosts_env.split(',') if host.strip()]
 
 # Application definition
-
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -80,7 +70,7 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ),
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 10,  #10 registros por página
+    'PAGE_SIZE': 10,
 }
 
 SIMPLE_JWT = {
@@ -94,8 +84,6 @@ SIMPLE_JWT = {
 }
 
 # Database
-# https://docs.djangoproject.com/en/6.0/ref/settings/#databases
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
@@ -111,10 +99,7 @@ DATABASES = {
     }
 }
 
-
 # Password validation
-# https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
-
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
@@ -130,27 +115,16 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-
 # Internationalization
-# https://docs.djangoproject.com/en/6.0/topics/i18n/
-
 LANGUAGE_CODE = 'es-ar'
-
-TIME_ZONE = 'America/Argentina/Buenos_Aires'
-
+TIME_ZONE = 'America/Argentina/Cordoba'
 USE_I18N = True
-
 USE_TZ = True
 
-
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/6.0/howto/static-files/
-
-# Archivos Estáticos (CSS, JavaScript, Imágenes del sistema y del admin)
+# Static files
 STATIC_URL = '/static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
-# Almacenamiento optimizado de WhiteNoise (comprime y genera hashes para caché)
 STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
@@ -160,23 +134,19 @@ STORAGES = {
     },
 }
 
+# CORS y CSRF (Orígenes explícitos desde .env)
 cors_origins_env = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:5173,http://127.0.0.1:5173')
 CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins_env.split(',') if origin.strip()]
-
-#CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
-# Ruta pública para acceder a los archivos desde la URL
-MEDIA_URL = '/media/'
+csrf_origins_env = os.environ.get('CSRF_TRUSTED_ORIGINS', 'http://localhost:5173,http://127.0.0.1:5173')
+CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_origins_env.split(',') if origin.strip()]
 
-# Carpeta física donde se guardan los archivos en el servidor
+# Media files
+MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
-CSRF_TRUSTED_ORIGINS = [
-    'https://*.ngrok-free.app',
-    'https://*.ngrok-free.dev',
-]
-
+# Proxy settings for HTTPS
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 USE_X_FORWARDED_HOST = True
 USE_X_FORWARDED_PORT = True
